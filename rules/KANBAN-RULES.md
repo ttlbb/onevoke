@@ -26,7 +26,9 @@ kanban init [project-path]
 kanban rules
 kanban list [--mobile] [backlog|todo|working|done|archived|trash]
 kanban show <task-id>
-kanban new [--large] <feature|bug|chore|research> <slug> <title...>
+kanban new [--large | --size S|M|L] <feature|bug|chore|research> <slug> <title...>
+kanban add [--size S|M|L] [--type TYPE] [--slug SLUG] <title...>
+kanban do [--size S|M|L] [--type TYPE] [--slug SLUG] [--agent AGENT] [--launcher LAUNCHER] <task-id|title...>
 kanban move <task-id> <todo|working|done|archived|trash>
 kanban pick [task-id]
 kanban start [--agent codex|claude|grok] [--launcher tmux|tmux-session|foreground|console] [task-id]
@@ -34,6 +36,19 @@ kanban check
 kanban web [--host HOST] [--port PORT] [--refresh SECONDS] [--assets DIR] [--open]
 kanban tui [--single] [--refresh SECONDS] [--theme auto|light|dark]
 ```
+
+Lite 入口 `kb` 调用同一个实现和安全边界，不维护第二套状态机：
+
+```text
+kb add [--size S|M|L] [--type TYPE] [--slug SLUG] <title...>
+kb do [--size S|M|L] [--type TYPE] [--slug SLUG] [--agent codex|claude] [--launcher LAUNCHER] <task-id|title...>
+kb list [inbox|todo|doing|done]
+```
+
+- `kb add` 默认创建 S 轻量卡，自动填入可进入 Todo 的最低契约；不传 slug 时从标题生成，无法转成 ASCII 时使用 `task`，同日重名自动加序号.
+- `kb do <标题>` 顺序合并 add -> backlog 到 todo -> start；传现有 task-id 时接受 Inbox/backlog 或 Todo/todo 卡. 启动失败沿用 `start` 的原子回滚，卡片保留在 Todo 供排查或重试.
+- `kb list` 只展示四个活跃状态并映射 `backlog=Inbox`, `todo=Todo`, `working=Doing`, `done=Done`; Archived/Trash 默认隐藏. `kanban` 仍可查看和操作全部六个底层状态.
+- Lite 的 Executor 入口只接受 Codex 或 Claude；Classic 的 `kanban` 继续兼容 Grok.
 
 - `start` 的 Agent, launcher 和模型档位默认取 Onevoke 配置, welcome 未完成时回落到默认值; `--agent` 与 `--launcher` 只覆盖本次. `start` 默认使用 Agent 的免确认模式. 原生 Windows 上 Agent CLI 必须解析为原生 `.exe`; `.cmd`/`.bat` 无法提供无损 argv 边界, `welcome`, `doctor` 与 `start` 均不得把它们视为可用 Agent.
 - `init` 幂等创建看板及 6 个状态目录, Git 项目只更新本地 `info/exclude`. Windows 新目录必须相对固定父句柄以 `CREATE_NEW` 创建并在创建时应用当前用户独占的 protected DACL, 创建竞态失败关闭; 既有目录只迁移叶目录 ACL. Git exclude 的父链逐分量拒绝 reparse point, 既有 ACL 不变, 去重读取和追加在同一固定叶句柄及文件锁内完成.
@@ -52,6 +67,8 @@ kanban tui [--single] [--refresh SECONDS] [--theme auto|light|dark]
 - `done/`: 已满足完成门禁的近期任务.
 - `archived/`: 不占活跃看板的完成, 取消, 重复或不修复记录.
 - `trash/`: 用户明确要求删除, 但尚未永久清理的入口; 不是任务状态.
+
+Lite 的四列只是上述目录的显示与命令兼容层，不创建 `inbox/` 或 `doing/` 目录，也不迁移已有卡片.
 
 ```text
 backlog -> todo -> working -> done -> archived
@@ -77,6 +94,9 @@ backlog -> todo -> working -> done -> archived
 # <任务标题>
 
 - 类型: Feature | Bug | Chore | Research
+- 规模: S | M | L
+- 工作树策略: current | optional | required
+- 审核策略: skip | QA
 - 任务组:
 - 创建时间: YYYY-MM-DD HH:MM
 - 负责人:
@@ -136,10 +156,15 @@ backlog -> todo -> working -> done -> archived
 
 ## 任务规模与任务组
 
+- Lite 规模 S: 局部且低风险，可在一轮实现和验证中完成；使用单文件轻量卡，不强制独立 spec，默认跳过 Review，默认在当前分支执行.
+- Lite 规模 M: 涉及一个完整功能、接口或算法调整；使用单文件轻量卡，不强制独立 spec，完成后只跑一次 QA，worktree 可选.
+- Lite 规模 L: 跨模块、重构、迁移或需要独立契约；必须使用目录卡和 `spec.md`，完成后只跑一次 QA，并强制独立 worktree.
+- 卡片元数据中的 `规模`, `工作树策略`, `审核策略` 是 Agent 执行依据. 没有 `规模` 的旧目录卡按 L、旧单文件卡按 M 处理，避免误跳 QA.
+
 - 选卡片形态前先判断总体目标能否拆成可独立领取, 验收或终止, 且资源不冲突的并行子任务. 能拆就必须建任务组, 不得仅因范围大而保留为单张大任务卡.
 - 小任务是单文件卡片; 大任务是目标, 负责人, 验收和生命周期必须统一, 不能安全拆成并行交付, 且需要独立 spec, 按需分阶段计划和完整报告的单张卡片. 行数不是判据.
 - 拆卡应减少依赖以便并行, 且不得职责重叠; 不能安全隔离的同资源修改须建立依赖并串行, 但不影响其他无冲突子任务并行. 组内每张子卡再按自身复杂度选小任务或大任务形态.
-- 新卡默认是小任务. 小任务变复杂时, 仅 `backlog/` 的当前编辑者或 `working/` 的负责人可以升级: 建同 ID 目录, 原内容转入 `spec.md`, 按需建 `plan.md`, 不保留原文件. `todo/` 中禁止改变形态.
+- `kanban new` 默认创建 M 单文件卡，`kb add` 默认创建 S 单文件卡；只有 L 强制目录卡和 `spec.md`. 任务变复杂时, 仅 `backlog/` 的当前编辑者或 `working/` 的负责人可以升级: 建同 ID 目录, 原内容转入 `spec.md`, 按需建 `plan.md`, 不保留原文件. `todo/` 中禁止改变形态.
 
 任务组只是独立卡片间的关系, 不是入口或状态. 每张卡的元数据都保留可选的 `任务组` 字段; 不属于任务组时留空, 属于任务组时必须填写组内一致的任务组 ID. 每张组内卡还在 `讨论与决策` 开头记录:
 

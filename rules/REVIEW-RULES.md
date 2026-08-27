@@ -4,6 +4,7 @@
 
 ## Reviewer 选择
 
+- Lite 日常只配置 Executor 与 QA Reviewer，推荐 Codex 或 Claude；`PM`, `CSA`, `Hacker` 兼容字段保留但默认跳过. Classic 继续支持下述三种 reviewer 和四角色独立选择.
 - 支持 Codex, Claude 与 Grok 三个 reviewer. POSIX 的平台公开审核入口是命令根下的 `onevoke-review.sh`; 原生 Windows 的人工交互入口是命令根下的 `onevoke-review.cmd`, 命令根下的 `onevoke review` 的程序化分发直接进入同目录的 `onevoke_review.py`. 这些路径共享单一门禁实现. Windows Reviewer CLI 必须解析为原生 `.exe`, `.cmd`/`.bat` 一律视为不可用. 除下表的 CLI 与隔离参数外, 本文件全部规则对三者一致. 新增 reviewer 时扩展 Python 实现的 agent 适配层和配置枚举, 不新增按 agent 命名的脚本. 项目安装必须使用命令根绝对入口, 禁止改用 PATH 中的全局同名命令.
 
 | reviewer | agent 参数 | CLI | 入口的隔离参数 |
@@ -26,6 +27,9 @@
 - 运行环境问题若影响验证可信度, 交付可用性或用户数据安全, 必须明确告知用户. 除非改动直接引入, 加剧或掩盖该问题, 或用户明确要求处理, 否则只记为验证事实, 禁单独判为 blocking, high 或 medium, 亦禁据此要求无关修复.
 
 ## 前置条件与执行
+
+- Lite 先按卡片 `规模` 应用规模门禁：S 默认跳过全部 Review；M/L 默认只运行一次 QA. 没有规模字段的旧单文件卡按 M、旧目录卡按 L，避免误跳审核. 用户指令或项目规则明确要求额外角色时优先，并以 `onevoke review --force ...` 调用来越过命令级 Lite 跳过策略.
+- Lite 的规模策略优先于下述 Classic 白名单和审核档案，但不降低验证要求；S 仍须运行与改动相称的测试和静态检查. `review_stages.<role>=required` 也会越过 Lite 默认跳过.
 
 - 审核触发采用白名单: 任务命中下列任一条目才进入审核, 未命中一律不自动审核. 用户明确要求审核时无条件进入, 不受白名单限制.
   1. 明确的功能开发或 Bug 修复任务.
@@ -85,7 +89,7 @@
 
 ## 审核环节
 
-除「审核档案」和白名单触发条件外, 每个角色是否运行还受默认环节策略约束. 配置文件的 `review_stages` 为四角色各指定 `auto`, `skip` 或 `required`, 缺省为 `auto`. 用命令根下的 `onevoke config` 查看.
+除「审核档案」和白名单触发条件外, 每个角色是否运行还受默认环节策略约束. 配置文件的 `review_stages` 为四角色各指定 `auto`, `skip` 或 `required`. Lite 缺省为 `PM=skip CSA=skip Hacker=skip QA=auto`; Classic 缺省四者均为 `auto`. 用命令根下的 `onevoke config` 查看.
 
 解析每个角色时, 按优先级取第一个明确指定的来源:
 

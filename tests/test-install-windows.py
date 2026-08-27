@@ -545,6 +545,7 @@ class WindowsInstallerTest(unittest.TestCase):
         targets = {
             "onevoke.cmd": "onevoke",
             "kanban.cmd": "kanban",
+            "kb.cmd": "kanban",
             "merge-worktree-memory.cmd": "merge-worktree-memory.py",
         }
         script = (
@@ -570,7 +571,10 @@ class WindowsInstallerTest(unittest.TestCase):
                 )
                 self.assertEqual(0, result.returncode, result.stderr)
                 payload = json.loads(result.stdout)
-                self.assertEqual(["空 格", "--flag=value"], payload["args"])
+                expected = ["空 格", "--flag=value"]
+                if shim_name == "kb.cmd":
+                    expected.insert(0, "--lite")
+                self.assertEqual(expected, payload["args"])
                 self.assertEqual(1, payload["utf8"])
                 self.assertEqual("utf-8", payload["encoding"].lower())
                 self.assertEqual("1", payload["no_bytecode"])
@@ -600,6 +604,7 @@ class WindowsInstallerTest(unittest.TestCase):
         for shim_name, target_name in {
             "onevoke.cmd": "onevoke",
             "kanban.cmd": "kanban",
+            "kb.cmd": "kanban",
             "merge-worktree-memory.cmd": "merge-worktree-memory.py",
         }.items():
             shutil.copy2(PROJECT_ROOT / "bin" / shim_name, shim_dir / shim_name)
@@ -620,7 +625,10 @@ class WindowsInstallerTest(unittest.TestCase):
                     timeout=10,
                 )
                 self.assertEqual(0, result.returncode, result.stderr)
-                self.assertEqual(["safe argument"], json.loads(result.stdout))
+                expected = ["safe argument"]
+                if shim_name == "kb.cmd":
+                    expected.insert(0, "--lite")
+                self.assertEqual(expected, json.loads(result.stdout))
 
 
 if __name__ == "__main__":

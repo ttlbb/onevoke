@@ -2,7 +2,7 @@
 
 - 规则集入口: 本文件 `ONEVOKE-AGENTS.md`. 只放分册索引, 优先级和默认取值; 通用条款在同目录 `BASE-RULES.md`.
 - 当前读取的本文件位置决定安装作用域. 不维护两套规则; 安装器把同一套分册原文覆盖到当前作用域的规则根, 不改写 Markdown 正文.
-- POSIX 用 `install.sh`, 原生 Windows 用 `install.ps1`. Windows 不自动修改用户 `PATH`; `.cmd` 入口只供人工交互的普通参数. 含特殊字符的自动化必须用进程 API 的 argv 数组直接调用显式 Python 解释器和命令根里的 Python 入口, 不得经过 PowerShell/cmd 命令字符串. 原生 Windows 的执行 Agent 与 Reviewer CLI 必须是原生 `.exe`, 不执行 `.cmd`/`.bat`. 本机的执行 Agent, launcher, 各审核角色及各 Agent 的模型档位保存在配置文件, 用命令根下的 `onevoke config` 查看, `onevoke welcome --reset` 修改.
+- POSIX 用 `install.sh`, 原生 Windows 用 `install.ps1`. Windows 不自动修改用户 `PATH`; `.cmd` 入口只供人工交互的普通参数. 含特殊字符的自动化必须用进程 API 的 argv 数组直接调用显式 Python 解释器和命令根里的 Python 入口, 不得经过 PowerShell/cmd 命令字符串. 原生 Windows 的执行 Agent 与 Reviewer CLI 必须是原生 `.exe`, 不执行 `.cmd`/`.bat`. 本机的工作流模式, 执行 Agent, launcher, 各审核角色及各 Agent 的模型档位保存在配置文件, 用命令根下的 `onevoke config` 查看, `onevoke welcome --reset` 修改.
 - 全局安装且 `~/.agents/AGENTS.md` 不存在时, POSIX 安装器将其符号链接到本文件; Windows 安装器优先创建硬链接并回落到符号链接, 无法安全创建则安装失败. 已有同名入口时保持不变. 项目安装不创建或修改该全局入口.
 - 配置文件和审核运行目录必须仅允许当前用户访问: POSIX 使用 `0600`/`0700`; Windows 私有目录/文件在创建瞬间即使用关闭继承的受保护 DACL, 不得先按继承 ACL 发布再收紧. Windows 审核运行目录必须在敏感文件写入、Reviewer 运行、进程树收集和清理期间持续持有不共享 WRITE/DELETE 的根句柄, 同时阻止入口改名和原地 reparse 切换; 清理从固定句柄逐层拒绝 reparse point, 并设置有界预算, 清理失败时审核失败. Windows 配置路径必须从卷/UNC anchor 逐分量拒绝 reparse point; 内容读取、schema 校验和有效旧配置 DACL 迁移必须保持同一固定句柄, 无效配置不迁移 ACL; 保存时临时文件先私有再写入, 并只收紧本次新建的配置目录, 不得改动既有祖先 DACL. Windows 的目标记忆目录/文件也必须迁移为当前用户独占的受保护 DACL. 看板、Git exclude 及记忆合并在 Windows 拒绝符号链接、junction 等 reparse point; Git exclude 保持既有 ACL 并在同一固定句柄内去重追加, 记忆合并通过固定句柄读取/追加并使用 `LockFileEx`; 禁绕过 Onevoke 命令直接操作这些边界.
 
@@ -44,6 +44,13 @@
 
 ## 默认取值
 
+### 工作流模式
+
+- 新安装默认 `lite`; 没有 `workflow_mode` 的旧版 schema 1 配置按 `classic` 解释，保持原行为. 用命令根下的 `onevoke mode [lite|classic]` 查看或切换.
+- Lite 是 Classic 的兼容层: `kb` 提供日常入口，底层仍使用同一份 `kanban/`、六状态目录、配置和审核门禁，不复制或迁移数据.
+- Lite 只有 Executor 与 QA Reviewer 两类日常角色，优先使用 Codex 或 Claude. Classic 继续支持 PM/CSA/Hacker/QA 分角色配置及 Grok.
+- Lite 任务规模策略: S 跳过审核、当前分支；M 一次 QA、worktree 可选；L 一次 QA、强制 worktree 和 `spec.md`. 用户指令和项目规则可明确覆盖；强制调用被 Lite 跳过的审核使用 `onevoke review --force ...`.
+
 ### 分支
 
 - 固定 `main` + `develop`, 不使用其他长期分支模型; 机制与初始化见 `GIT-RULES.md`「分支与 worktree」.
@@ -56,12 +63,12 @@
 
 ### Reviewer
 
-- `PM`, `CSA`, `Hacker`, `QA` 各取 Onevoke 配置中的 reviewer, 未完成 welcome 时四者都回落到 Codex.
+- Lite 日常只取 Executor 与 `QA` Reviewer；兼容字段中的 `PM`, `CSA`, `Hacker` 默认跳过. Classic 的 `PM`, `CSA`, `Hacker`, `QA` 各取 Onevoke 配置中的 reviewer. 未完成 welcome 时各角色都回落到 Codex.
 - 未被用户指令, 项目规则或用户自己的全局规则覆盖时, 审核一律通过命令根下的 `onevoke review` 分发. 同一角色一轮审核内不换 Agent; 不同角色可用不同 Agent.
 
 ### 审核环节
 
-- 默认环节策略保存在配置文件的 `review_stages`, 用命令根下的 `onevoke config` 查看. 每个角色取 `auto`, `skip` 或 `required` 之一, 缺省为 `auto`.
+- 默认环节策略保存在配置文件的 `review_stages`, 用命令根下的 `onevoke config` 查看. 每个角色取 `auto`, `skip` 或 `required` 之一. Lite 缺省为 `PM=skip CSA=skip Hacker=skip QA=auto`; Classic 缺省四者均为 `auto`.
 - 环节是否实际运行, 按 `REVIEW-RULES.md`「审核环节」的优先级链解析; 项目级 `AGENTS.md` 或 `CLAUDE.md`, 以及当前任务的用户指令可覆盖当前作用域配置.
 
 ### 看板任务完成

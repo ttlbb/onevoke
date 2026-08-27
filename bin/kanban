@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import argparse
+import errno
 import hashlib
 import json
 import os
@@ -52,9 +53,23 @@ apply_language_argument(sys.argv[1:])
 bind_effective_language()
 t = language_text
 argparse._ = lambda message: t(ARGPARSE_ZH.get(message, message), message)
+LITE_ENTRY = "--lite" in sys.argv[1:]
 
 
 STATES = ("backlog", "todo", "working", "done", "archived", "trash")
+LITE_STATES = {
+    "inbox": "backlog",
+    "todo": "todo",
+    "doing": "working",
+    "done": "done",
+}
+LITE_STATE_LABELS = {
+    "backlog": "Inbox",
+    "todo": "Todo",
+    "working": "Doing",
+    "done": "Done",
+}
+TASK_SIZES = ("S", "M", "L")
 TRANSITIONS = {
     "backlog": {"todo", "archived", "trash"},
     "todo": {"working", "archived", "trash"},
@@ -210,7 +225,9 @@ def command_rules() -> None:
     sys.stdout.write(rules.read_text(encoding="utf-8"))
 
 
-def start_agent_prompt(task_id: str, paths: InstallPaths) -> str:
+def start_agent_prompt(
+    task_id: str, paths: InstallPaths, size: str = "M", lite: bool = False
+) -> str:
     """生成 start 交给执行 Agent 的固定说明.
 
     全局模式保持 PATH 中的 `kanban` 与相对的项目 AGENTS.md; 项目模式必须
@@ -227,15 +244,23 @@ def start_agent_prompt(task_id: str, paths: InstallPaths) -> str:
             )
         kanban_cmd = str(paths.bin_dir / "kanban")
         agents_md = str(paths.project_root / "AGENTS.md")
-        return (
+        base = (
             f"执行 Kanban 任务 {task_id}. 先运行 {kanban_cmd} rules, 再运行 "
             f"{kanban_cmd} show {task_id}. 卡片已进入 working. 遵守 {agents_md}, "
             "补充任务分支, 并按项目规则完成任务、验证、审核、集成和看板收尾."
         )
+    else:
+        base = (
+            f"执行 Kanban 任务 {task_id}. 先运行 kanban rules, 再运行 "
+            f"kanban show {task_id}. 卡片已进入 working. 遵守目标项目 AGENTS.md, "
+            "补充任务分支, 并按项目规则完成任务、验证、审核、集成和看板收尾."
+        )
+    if not lite:
+        return base
+    worktree_policy, review_policy = size_policy(size)
     return (
-        f"执行 Kanban 任务 {task_id}. 先运行 kanban rules, 再运行 "
-        f"kanban show {task_id}. 卡片已进入 working. 遵守目标项目 AGENTS.md, "
-        "补充任务分支, 并按项目规则完成任务、验证、审核、集成和看板收尾."
+        f"{base} Lite 规模={size}, 工作树策略={worktree_policy}, "
+        f"审核策略={review_policy}; 用户或项目规则的明确覆盖仍优先."
     )
 
 
@@ -488,7 +513,7 @@ def openat_nofollow(dir_fd: int, name: str, flags: int) -> int:
     try:
         return os.open(name, open_flags, dir_fd=dir_fd)
     except OSError as error:
-        if getattr(error, "errno", None) in {getattr(os, "ELOOP", 40), 40}:
+        if getattr(error, "errno", None) == errno.ELOOP:
             raise KanbanError(t(f"路径分量不得是符号链接: {name}", f"Path component must not be a symlink: {name}")) from error
         raise
 
@@ -766,11 +791,31 @@ def validate_target(entry: Entry, target_state: str, text: str) -> None:
         raise KanbanError(t("移入 trash 前必须填写: 结果: trashed", "Before moving to trash, set: 结果: trashed"))
 
 
-def render_contract(title: str, task_type: str) -> str:
+def task_size(entry: Entry, text: str) -> str:
+    value = metadata_from(text, "规模").upper()
+    if value in TASK_SIZES:
+        return value
+    # 老卡没有规模字段. 目录卡安全地视为 L；单文件卡视为 M，避免误跳 QA.
+    return "L" if entry.kind == "large" else "M"
+
+
+def size_policy(size: str) -> tuple[str, str]:
+    return {
+        "S": ("current", "skip"),
+        "M": ("optional", "QA"),
+        "L": ("required", "QA"),
+    }[size]
+
+
+def render_contract(title: str, task_type: str, size: str) -> str:
     created = datetime.now().strftime("%Y-%m-%d %H:%M")
+    worktree_policy, review_policy = size_policy(size)
     return f"""# {title}
 
 - 类型: {TYPE_NAMES[task_type]}
+- 规模: {size}
+- 工作树策略: {worktree_policy}
+- 审核策略: {review_policy}
 - 任务组:
 - 创建时间: {created}
 - 负责人:
@@ -808,20 +853,55 @@ N/A
 """
 
 
-def command_new(args: argparse.Namespace, root: Path) -> None:
-    if not SLUG_RE.fullmatch(args.slug):
-        raise KanbanError(t("slug 只能包含小写 ASCII 字母, 数字和连字符", "slug may contain only lowercase ASCII letters, digits, and hyphens"))
-    title = " ".join(args.title).strip()
+def normalize_title(parts: list[str]) -> str:
+    title = " ".join(parts).strip()
     if not title or "\n" in title or "\r" in title:
         raise KanbanError(t("标题不能为空或包含换行", "Title must not be empty or contain newlines"))
-    board = load_board(root)
-    task_id = f"{datetime.now().strftime('%Y%m%d')}-{args.slug}-task"
+    return title
+
+
+def validate_slug(slug: str) -> None:
+    if not SLUG_RE.fullmatch(slug):
+        raise KanbanError(t("slug 只能包含小写 ASCII 字母, 数字和连字符", "slug may contain only lowercase ASCII letters, digits, and hyphens"))
+
+
+def create_task(
+    root: Path,
+    board: Board,
+    *,
+    title: str,
+    task_type: str,
+    slug: str,
+    size: str,
+    ready: bool,
+) -> Entry:
+    validate_slug(slug)
+    task_id = f"{datetime.now().strftime('%Y%m%d')}-{slug}-task"
     if task_id in board.entries or task_id in board.blocked:
         raise KanbanError(t(f"任务已存在: {task_id}", f"Task already exists: {task_id}"))
-    contract = render_contract(title, args.type)
+    contract = render_contract(title, task_type, size)
+    if ready:
+        for replacement in (
+            title,
+            t(f"完成「{title}」并保持现有行为兼容.", f"Complete '{title}' while preserving existing behavior."),
+            t("相关验证通过且没有已知回归.", "Relevant checks pass with no known regressions."),
+            t("未明确要求的扩展与重构.", "Unrequested extensions and refactors."),
+        ):
+            contract = contract.replace("<填写>", replacement, 1)
+    large = size == "L"
+    content = contract
+    if not large:
+        content += """## 实施与验证
+
+<填写>
+
+## 完成总结
+
+<填写>
+"""
     if os.name == "nt":
         try:
-            if args.large:
+            if large:
                 target = create_directory_with_text_file_nofollow(
                     root,
                     root / "backlog" / task_id,
@@ -830,14 +910,6 @@ def command_new(args: argparse.Namespace, root: Path) -> None:
                 )
             else:
                 target = root / "backlog" / f"{task_id}.md"
-                content = contract + """## 实施与验证
-
-<填写>
-
-## 完成总结
-
-<填写>
-"""
                 write_text_atomic_nofollow(
                     root,
                     target,
@@ -853,9 +925,8 @@ def command_new(args: argparse.Namespace, root: Path) -> None:
                 f"任务路径不得包含符号链接/重解析点: {error}",
                 f"Task path must not contain a symlink/reparse point: {error}",
             )) from error
-        print(target)
-        return
-    if args.large:
+        return Entry(task_id, "backlog", target, target / "spec.md" if large else target, "large" if large else "small")
+    if large:
         target = root / "backlog" / task_id
         target.mkdir()
         try:
@@ -866,17 +937,63 @@ def command_new(args: argparse.Namespace, root: Path) -> None:
             raise
     else:
         target = root / "backlog" / f"{task_id}.md"
-        content = contract + """## 实施与验证
-
-<填写>
-
-## 完成总结
-
-<填写>
-"""
         with target.open("x", encoding="utf-8", newline="\n") as file:
             file.write(content)
-    print(target)
+    return Entry(task_id, "backlog", target, target / "spec.md" if large else target, "large" if large else "small")
+
+
+def command_new(args: argparse.Namespace, root: Path) -> None:
+    title = normalize_title(args.title)
+    size = "L" if args.large else (args.size or "M")
+    if args.large and args.size and args.size != "L":
+        raise KanbanError(t("--large 不能与非 L 的 --size 同时使用", "--large cannot be combined with a non-L --size"))
+    entry = create_task(
+        root,
+        load_board(root),
+        title=title,
+        task_type=args.type,
+        slug=args.slug,
+        size=size,
+        ready=False,
+    )
+    print(entry.path)
+
+
+def slug_from_title(title: str) -> str:
+    folded = unicodedata.normalize("NFKD", title).encode("ascii", "ignore").decode("ascii")
+    words = re.findall(r"[a-z0-9]+", folded.lower())
+    return "-".join(words)[:48].strip("-") or "task"
+
+
+def unique_slug(board: Board, preferred: str) -> str:
+    date = datetime.now().strftime("%Y%m%d")
+    for suffix in range(1, 1000):
+        slug = preferred if suffix == 1 else f"{preferred[:43].rstrip('-')}-{suffix}"
+        task_id = f"{date}-{slug}-task"
+        if task_id not in board.entries and task_id not in board.blocked:
+            return slug
+    raise KanbanError(t("无法生成唯一任务 ID; 请用 --slug 指定", "Cannot generate a unique task ID; specify --slug"))
+
+
+def create_lite_task(args: argparse.Namespace, root: Path) -> Entry:
+    title = normalize_title(args.item)
+    board = load_board(root)
+    preferred = args.slug or slug_from_title(title)
+    validate_slug(preferred)
+    slug = unique_slug(board, preferred) if args.slug is None else preferred
+    return create_task(
+        root,
+        board,
+        title=title,
+        task_type=args.type,
+        slug=slug,
+        size=args.size,
+        ready=True,
+    )
+
+
+def command_add(args: argparse.Namespace, root: Path) -> None:
+    print(create_lite_task(args, root).path)
 
 
 def selected_entries(entries: Dict[str, Entry], state: Optional[str]) -> Iterable[Entry]:
@@ -917,8 +1034,11 @@ def select_todo(board: Board, task: Optional[str]) -> Entry:
 
 def command_list(args: argparse.Namespace, root: Path) -> None:
     board = load_board(root)
+    requested_state = LITE_STATES.get(args.state, args.state) if args.state else None
     rows = []
-    for entry in selected_entries(board.entries, args.state):
+    for entry in selected_entries(board.entries, requested_state):
+        if args.lite and args.state is None and entry.state not in LITE_STATE_LABELS:
+            continue
         text = read_document(entry)
         name = "开始时间" if entry.state == "working" else "完成时间"
         timestamp = metadata_from(text, name) if entry.state in {"working", "done"} else ""
@@ -927,9 +1047,16 @@ def command_list(args: argparse.Namespace, root: Path) -> None:
                 "%Y-%m-%d %H:%M"
             )
         rows.append(
-            (entry.state, entry.kind, timestamp or "-", entry.task_id, title_from(text))
+            (
+                entry.state,
+                LITE_STATE_LABELS.get(entry.state, entry.state) if args.lite else entry.state,
+                task_size(entry, text) if args.lite else entry.kind,
+                timestamp or "-",
+                entry.task_id,
+                title_from(text),
+            )
         )
-    rows.sort(key=lambda row: (row[2], row[3]), reverse=True)
+    rows.sort(key=lambda row: (row[3], row[4]), reverse=True)
     rows.sort(key=lambda row: STATES.index(row[0]))
     english_headers = ("STATE", "SIZE", "TIME")
     headers = tuple(t(chinese, english) for chinese, english in zip(
@@ -944,7 +1071,7 @@ def command_list(args: argparse.Namespace, root: Path) -> None:
         )
 
     widths = [
-        max([display_width(header), len(english_headers[index]), *(len(row[index]) for row in rows)])
+        max([display_width(header), len(english_headers[index]), *(len(row[index + 1]) for row in rows)])
         for index, header in enumerate(headers)
     ]
     use_color = "NO_COLOR" not in os.environ and (
@@ -973,11 +1100,11 @@ def command_list(args: argparse.Namespace, root: Path) -> None:
             if index:
                 print()
             print(
-                f"{color(row[0], palette[row[0]])}  "
-                f"{color(row[1], palette[row[1]])}  {row[2]}"
+                f"{color(row[1], palette[row[0]])}  "
+                f"{color(row[2], palette.get(row[2], palette[row[0]]))}  {row[3]}"
             )
-            print(color(row[3], palette["task"]))
-            print(color(row[4], palette["title"]))
+            print(color(row[4], palette["task"]))
+            print(color(row[5], palette["title"]))
         return
 
     heading = "  ".join(
@@ -987,12 +1114,12 @@ def command_list(args: argparse.Namespace, root: Path) -> None:
     print(color(heading + t("  任务 ID / 标题", "  TASK ID / TITLE"), "1"))
     print("  ".join("-" * width for width in widths) + "  ---------------")
     for row in rows:
-        state = color(f"{row[0]:<{widths[0]}}", palette[row[0]])
-        size = color(f"{row[1]:<{widths[1]}}", palette[row[1]])
-        timestamp = f"{row[2]:<{widths[2]}}"
+        state = color(f"{row[1]:<{widths[0]}}", palette[row[0]])
+        size = color(f"{row[2]:<{widths[1]}}", palette.get(row[2], palette[row[0]]))
+        timestamp = f"{row[3]:<{widths[2]}}"
         print(
             f"{state}  {size}  {timestamp}  "
-            f"{color(row[3], palette['task'])}  {color(row[4], palette['title'])}"
+            f"{color(row[4], palette['task'])}  {color(row[5], palette['title'])}"
         )
 
 
@@ -1083,6 +1210,28 @@ def command_pick(args: argparse.Namespace, root: Path) -> None:
     board = load_board(root)
     entry = locate(board, args.task) if args.task else select_from_state(board, "backlog")
     print(move_entry(entry, root, "todo").path)
+
+
+def command_do(args: argparse.Namespace, root: Path) -> None:
+    if len(args.item) == 1 and TASK_ID_RE.fullmatch(args.item[0].removesuffix(".md")):
+        entry = locate(load_board(root), args.item[0])
+    else:
+        entry = create_lite_task(args, root)
+        print(t(f"已添加: {entry.task_id}", f"added: {entry.task_id}"))
+    if entry.state == "backlog":
+        entry = move_entry(entry, root, "todo")
+    elif entry.state != "todo":
+        raise KanbanError(t(
+            f"kb do 只接受 Inbox/backlog 或 Todo/todo 任务: {entry.task_id} 当前位于 {entry.state}",
+            f"kb do accepts only Inbox/backlog or Todo/todo tasks: {entry.task_id} is in {entry.state}",
+        ))
+    start_args = argparse.Namespace(
+        task=entry.task_id,
+        agent=args.agent,
+        launcher=args.launcher,
+        lite=True,
+    )
+    command_start(start_args, root)
 
 
 def start_metadata(text: str, agent: str) -> str:
@@ -1217,6 +1366,12 @@ def command_start(args: argparse.Namespace, root: Path) -> None:
     entry = select_todo(load_board(root), args.task)
     config = effective_config(load_config())
     agent_name = args.agent or config["kanban_agent"]
+    lite = getattr(args, "lite", False) or config["workflow_mode"] == "lite"
+    if getattr(args, "lite", False) and agent_name not in ("codex", "claude"):
+        raise KanbanError(t(
+            "Lite 模式只支持 Codex 或 Claude Executor; 请用 --agent 覆盖或切换 Classic",
+            "Lite mode supports only Codex or Claude executors; override --agent or switch to Classic",
+        ))
     launcher = args.launcher or config["launcher"]
     if os.name == "nt" and launcher in ("tmux", "tmux-session"):
         raise KanbanError(t(
@@ -1259,7 +1414,12 @@ def command_start(args: argparse.Namespace, root: Path) -> None:
 
     original = read_document(entry)
     updated = start_metadata(original, agent_name)
-    prompt = start_agent_prompt(entry.task_id, current_install_paths())
+    prompt = start_agent_prompt(
+        entry.task_id,
+        current_install_paths(),
+        task_size(entry, original),
+        lite,
+    )
     moved = move_entry(entry, root, "working")
     name = window_name(entry, original)
     model_entry = config["models"]["kanban"][agent_name]
@@ -1593,8 +1753,14 @@ def command_check(root: Path) -> int:
 
 
 def parser() -> argparse.ArgumentParser:
-    result = LocalizedArgumentParser(prog="kanban", description=t("本地文件看板", "Local file kanban board"))
+    result = LocalizedArgumentParser(
+        prog="kb" if LITE_ENTRY else "kanban",
+        description=t("个人开发轻量看板", "Personal-development Lite board")
+        if LITE_ENTRY
+        else t("本地文件看板", "Local file kanban board"),
+    )
     result.add_argument("--lang", choices=LANGUAGES, help=t("覆盖输出语言", "override the output language"))
+    result.add_argument("--lite", action="store_true", help=argparse.SUPPRESS)
     commands = result.add_subparsers(dest="command", required=True)
 
     init_parser = commands.add_parser("init", help=t("创建看板目录框架", "create the board directory structure"))
@@ -1608,7 +1774,7 @@ def parser() -> argparse.ArgumentParser:
     commands.add_parser("rules", help=t("输出当前作用域看板规则", "print current-scope kanban rules"))
 
     list_parser = commands.add_parser("list", aliases=["ls"], help=t("列出任务", "list tasks"))
-    list_parser.add_argument("state", nargs="?", choices=STATES)
+    list_parser.add_argument("state", nargs="?", choices=tuple(dict.fromkeys((*STATES, *LITE_STATES))))
     list_parser.add_argument("--mobile", action="store_true", help=t("使用竖屏手机布局", "use a vertical mobile layout"))
 
     show_parser = commands.add_parser("show", help=t("输出入口任务文档", "print a task document"))
@@ -1616,9 +1782,16 @@ def parser() -> argparse.ArgumentParser:
 
     new_parser = commands.add_parser("new", help=t("在 backlog 创建任务", "create a task in backlog"))
     new_parser.add_argument("--large", action="store_true", help=t("创建大任务目录", "create a large-task directory"))
+    new_parser.add_argument("--size", type=str.upper, choices=TASK_SIZES, help=t("任务规模 S/M/L", "task size S/M/L"))
     new_parser.add_argument("type", choices=tuple(TYPE_NAMES))
     new_parser.add_argument("slug")
     new_parser.add_argument("title", nargs="+", metavar=t("标题", "title"))
+
+    add_parser = commands.add_parser("add", help=t("用轻量任务卡添加到 Inbox", "add a lightweight task to Inbox"))
+    add_parser.add_argument("--size", type=str.upper, choices=TASK_SIZES, default="S", help=t("任务规模, 默认 S", "task size; default S"))
+    add_parser.add_argument("--type", choices=tuple(TYPE_NAMES), default="chore", help=t("任务类型, 默认 chore", "task type; default chore"))
+    add_parser.add_argument("--slug", help=t("可选任务 slug; 默认从标题生成", "optional task slug; derived from title by default"))
+    add_parser.add_argument("item", nargs="+", metavar=t("标题", "title"))
 
     move_parser = commands.add_parser("move", help=t("迁移任务状态", "move a task between states"))
     move_parser.add_argument("task", metavar=t("任务", "task"))
@@ -1633,6 +1806,14 @@ def parser() -> argparse.ArgumentParser:
     start_parser.add_argument(
         "--launcher", choices=LAUNCHERS, help=t("覆盖配置中的启动方式", "override the configured launcher")
     )
+
+    do_parser = commands.add_parser("do", help=t("添加或领取任务并立即启动", "add or claim a task and start it"))
+    do_parser.add_argument("--size", type=str.upper, choices=TASK_SIZES, default="S", help=t("新任务规模, 默认 S", "new-task size; default S"))
+    do_parser.add_argument("--type", choices=tuple(TYPE_NAMES), default="chore", help=t("新任务类型, 默认 chore", "new-task type; default chore"))
+    do_parser.add_argument("--slug", help=t("新任务 slug", "new-task slug"))
+    do_parser.add_argument("--agent", choices=AGENT_NAMES, help=t("覆盖配置中的默认 Agent", "override the configured default Agent"))
+    do_parser.add_argument("--launcher", choices=LAUNCHERS, help=t("覆盖配置中的启动方式", "override the configured launcher"))
+    do_parser.add_argument("item", nargs="+", metavar=t("task-id 或标题", "task-id or title"))
 
     commands.add_parser("check", help=t("检查看板不变量", "check board invariants"))
 
@@ -1713,12 +1894,16 @@ def main() -> int:
             command_show(args, root)
         elif args.command == "new":
             command_new(args, root)
+        elif args.command == "add":
+            command_add(args, root)
         elif args.command == "move":
             command_move(args, root)
         elif args.command == "pick":
             command_pick(args, root)
         elif args.command == "start":
             command_start(args, root)
+        elif args.command == "do":
+            command_do(args, root)
         elif args.command == "check":
             return command_check(root)
         elif args.command == "web":
@@ -1727,7 +1912,7 @@ def main() -> int:
             command_tui(args, root)
         return 0
     except (KanbanError, ConfigError, OSError, UnicodeError) as error:
-        print(f"kanban: {error}", file=sys.stderr)
+        print(f"{'kb' if args.lite else 'kanban'}: {error}", file=sys.stderr)
         return 1
 
 

@@ -35,6 +35,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 COMMAND = Path(
     os.environ.get("KANBAN_COMMAND", PROJECT_ROOT / "bin" / "kanban")
 ).resolve()
+KB_COMMAND = PROJECT_ROOT / "bin" / "kb"
 INSTALLER = PROJECT_ROOT / "install.sh"
 INSTALLED_ZH = "Onevoke 已安装\n"
 INSTALLED_EN = "Onevoke installed\n"
@@ -94,6 +95,23 @@ class KanbanCommandTest(unittest.TestCase):
             self.fail(result.stderr)
         if not succeeds and result.returncode == 0:
             self.fail(f"command unexpectedly succeeded: {' '.join(args)}")
+        return result
+
+    def run_kb(
+        self, *args: str, succeeds: bool = True, input_text: Optional[str] = None
+    ) -> subprocess.CompletedProcess:
+        result = subprocess.run(
+            [sys.executable, str(KB_COMMAND), *args],
+            env=self.env,
+            text=True,
+            input=input_text,
+            capture_output=True,
+            check=False,
+        )
+        if succeeds and result.returncode != 0:
+            self.fail(result.stderr)
+        if not succeeds and result.returncode == 0:
+            self.fail(f"command unexpectedly succeeded: kb {' '.join(args)}")
         return result
 
     @staticmethod
@@ -278,6 +296,62 @@ printf '%s\\n' '@9'
         )
         self.assertEqual("通过: 2 个任务\n", self.run_command("check").stdout)
 
+    def test_kb_add_creates_ready_s_m_and_l_cards(self) -> None:
+        today = datetime.now().strftime("%Y%m%d")
+
+        self.run_kb("add", "--slug", "quick-fix", "快速修复")
+        self.run_kb("add", "--size", "m", "--slug", "new-api", "新增 API")
+        self.run_kb("add", "--size", "L", "--slug", "migration", "大型迁移")
+
+        small = self.root / "backlog" / f"{today}-quick-fix-task.md"
+        medium = self.root / "backlog" / f"{today}-new-api-task.md"
+        large = self.root / "backlog" / f"{today}-migration-task" / "spec.md"
+        self.assertTrue(small.is_file())
+        self.assertTrue(medium.is_file())
+        self.assertTrue(large.is_file())
+        self.assertIn("- 规模: S\n- 工作树策略: current\n- 审核策略: skip", small.read_text(encoding="utf-8"))
+        self.assertIn("- 规模: M\n- 工作树策略: optional\n- 审核策略: QA", medium.read_text(encoding="utf-8"))
+        self.assertIn("- 规模: L\n- 工作树策略: required\n- 审核策略: QA", large.read_text(encoding="utf-8"))
+        for document in (small, medium, large):
+            contract = document.read_text(encoding="utf-8").split("## 实施与验证", 1)[0]
+            self.assertNotIn("<填写>", contract)
+
+        output = self.run_kb("list").stdout
+        self.assertIn("Inbox  S", output)
+        self.assertIn("Inbox  M", output)
+        self.assertIn("Inbox  L", output)
+        self.assertNotIn("backlog", output)
+
+    def test_kb_list_maps_four_active_states_and_hides_archives(self) -> None:
+        today = datetime.now().strftime("%Y%m%d")
+        for state, slug in (("backlog", "inbox"), ("todo", "todo"), ("working", "doing"), ("done", "done"), ("archived", "old")):
+            (self.root / state / f"{today}-{slug}-task.md").write_text(
+                f"# {slug}\n- 规模: S\n", encoding="utf-8"
+            )
+
+        output = self.run_kb("list").stdout
+
+        for label in ("Inbox", "Todo", "Doing", "Done"):
+            self.assertIn(label, output)
+        self.assertNotIn(f"{today}-old-task", output)
+        self.assertIn(f"{today}-inbox-task", self.run_kb("list", "inbox").stdout)
+
+    def test_kb_do_combines_add_pick_and_start(self) -> None:
+        today = datetime.now().strftime("%Y%m%d")
+        task_id = f"{today}-do-now-task"
+        self.install_fake_launchers()
+
+        result = self.run_kb("do", "--slug", "do-now", "立即处理")
+
+        self.assertIn(f"已添加: {task_id}", result.stdout)
+        self.assertIn(f"已启动: {task_id}", result.stdout)
+        task = self.root / "working" / f"{task_id}.md"
+        self.assertTrue(task.is_file())
+        command = (self.root / "tmux.log").read_text(encoding="utf-8").splitlines()[-1]
+        self.assertIn("Lite 规模=S", command)
+        self.assertIn("工作树策略=current", command)
+        self.assertIn("审核策略=skip", command)
+
     def test_new_templates_include_optional_task_group_metadata(self) -> None:
         today = datetime.now().strftime("%Y%m%d")
         self.run_command("new", "chore", "small-group-field", "小任务组字段")
@@ -290,7 +364,8 @@ printf '%s\\n' '@9'
         for document in (small, large):
             text = document.read_text(encoding="utf-8")
             self.assertEqual(1, text.count("- 任务组:\n"))
-            self.assertIn("- 类型: Chore\n- 任务组:\n- 创建时间:", text)
+            self.assertIn("- 类型: Chore\n- 规模:", text)
+            self.assertIn("- 任务组:\n- 创建时间:", text)
 
     def test_pick_moves_only_ready_backlog_task_to_todo(self) -> None:
         task_id = f"{datetime.now().strftime('%Y%m%d')}-pick-task"

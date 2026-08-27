@@ -10,7 +10,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any, NoReturn
+from typing import Any
 
 from onevoke_config import (
     ARGPARSE_ZH,
@@ -19,6 +19,7 @@ from onevoke_config import (
     REVIEW_AGENTS,
     REVIEW_ROLES,
     REVIEW_STAGE_MODES,
+    WORKFLOW_MODES,
     ConfigError,
     InstallPaths,
     LocalizedArgumentParser,
@@ -28,6 +29,7 @@ from onevoke_config import (
     config_path,
     configured_language,
     default_config,
+    default_review_stages,
     effective_config,
     install_paths,
     language_text,
@@ -48,6 +50,7 @@ MERGE_ENTRYPOINT = "merge-worktree-memory.cmd" if os.name == "nt" else "merge-wo
 COMMANDS = (
     "onevoke",
     "kanban",
+    "kb.cmd" if os.name == "nt" else "kb",
     REVIEW_ENTRYPOINT,
     MERGE_ENTRYPOINT,
 )
@@ -59,6 +62,10 @@ REVIEW_STAGE_LABELS = {
     "required": ("默认必跑", "required when review runs"),
 }
 LANGUAGE_LABELS = {"cn": ("中文", "Chinese"), "en": ("英文", "English")}
+WORKFLOW_LABELS = {
+    "lite": ("Lite (个人开发)", "Lite (personal development)"),
+    "classic": ("Classic (完整治理)", "Classic (full governance)"),
+}
 
 
 class OnevokeError(Exception):
@@ -658,6 +665,11 @@ def format_language_summary(language: str) -> str:
     return t(labels[0], labels[1])
 
 
+def format_workflow_summary(workflow_mode: str) -> str:
+    labels = WORKFLOW_LABELS.get(workflow_mode, (workflow_mode, workflow_mode))
+    return t(labels[0], labels[1])
+
+
 def edit_language(config: dict[str, Any]) -> None:
     config["language"] = ask_choice(
         t("默认输出语言?", "Default output language?"),
@@ -908,6 +920,10 @@ def print_welcome_menu(config: dict[str, Any]) -> None:
         f"  10. {t('默认语言', 'Default language')}: {format_language_summary(config['language'])}",
         file=sys.stderr,
     )
+    print(
+        f"  11. {t('工作流', 'Workflow')}: {format_workflow_summary(config['workflow_mode'])}",
+        file=sys.stderr,
+    )
     print(t("  直接回车保存当前配置; 输入 q 退出且不保存.", "  Press Enter to save; enter q to quit without saving."), file=sys.stderr)
 
 
@@ -916,8 +932,8 @@ def ask_welcome_action(config: dict[str, Any]) -> str:
         print_welcome_menu(config)
         print(
             t(
-                "请选择要修改的项目 [1-10], 直接回车保存, q 取消: ",
-                "Choose an item to change [1-10], press Enter to save, or q to cancel: ",
+                "请选择要修改的项目 [1-11], 直接回车保存, q 取消: ",
+                "Choose an item to change [1-11], press Enter to save, or q to cancel: ",
             ),
             end="",
             file=sys.stderr,
@@ -931,7 +947,7 @@ def ask_welcome_action(config: dict[str, Any]) -> str:
             return "save"
         if answer == "q":
             return "cancel"
-        if answer.isdigit() and 1 <= int(answer) <= 10:
+        if answer.isdigit() and 1 <= int(answer) <= 11:
             return answer
         print(t("输入无效, 请重新选择.", "Invalid input; choose again."), file=sys.stderr)
 
@@ -967,6 +983,7 @@ def configure_welcome(existing: dict[str, Any], *, config_valid: bool) -> dict[s
         raise OnevokeError(t("没有发现可用 Reviewer. 请安装 Codex、Claude 或 Grok.", "No usable Reviewer found. Install Codex, Claude, or Grok."))
 
     config = default_config()
+    config["workflow_mode"] = existing["workflow_mode"]
     config["models"] = {
         section: {agent: dict(entry) for agent, entry in entries.items()}
         for section, entries in existing["models"].items()
@@ -1045,6 +1062,18 @@ def configure_welcome(existing: dict[str, Any], *, config_valid: bool) -> dict[s
             edit_review_stages(config)
         elif action == "10":
             edit_language(config)
+        elif action == "11":
+            workflow_mode = ask_choice(
+                t("使用哪种工作流?", "Which workflow should be used?"),
+                [
+                    (mode, format_workflow_summary(mode))
+                    for mode in WORKFLOW_MODES
+                ],
+                config["workflow_mode"],
+            )
+            if workflow_mode != config["workflow_mode"]:
+                config["workflow_mode"] = workflow_mode
+                config["review_stages"] = default_review_stages(workflow_mode)
 
     selected_agent = config["kanban_agent"]
     entry = rules_entry()
@@ -1099,12 +1128,46 @@ def command_welcome(reset: bool) -> int:
     return 0
 
 
-def command_review(arguments: list[str]) -> NoReturn:
+def lite_task_size(task_context: str) -> str:
+    """从 Lite 卡片读取 S/M/L；无法识别时按 M 处理，避免误跳审核."""
+    path = Path(task_context)
+    if path.is_dir():
+        path = path / "spec.md"
+    try:
+        if not path.is_file():
+            return "M"
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return "M"
+    match = re.search(r"(?m)^- 规模:\s*([SML])\s*$", text)
+    return match.group(1) if match else "M"
+
+
+def lite_review_skip_reason(
+    config: dict[str, Any], role: str, task_context: str
+) -> str | None:
+    if config["workflow_mode"] != "lite":
+        return None
+    stage = config["review_stages"][role]
+    if stage == "required":
+        return None
+    size = lite_task_size(task_context)
+    if size == "S":
+        return t("Lite S 任务默认不审核", "Lite S tasks skip review by default")
+    if stage == "skip" or role != "QA":
+        return t(f"Lite {size} 任务只运行 QA", f"Lite {size} tasks run QA only")
+    return None
+
+
+def command_review(arguments: list[str]) -> None:
+    force = bool(arguments and arguments[0] == "--force")
+    if force:
+        arguments = arguments[1:]
     if len(arguments) < 5 or len(arguments) > 6:
         raise OnevokeError(
             t(
-                "用法: onevoke review <worktree> <base> <commit> <role> <task> [context]",
-                "usage: onevoke review <worktree> <base> <commit> <role> <task> [context]",
+                "用法: onevoke review [--force] <worktree> <base> <commit> <role> <task> [context]",
+                "usage: onevoke review [--force] <worktree> <base> <commit> <role> <task> [context]",
             )
         )
     role = arguments[3]
@@ -1114,6 +1177,11 @@ def command_review(arguments: list[str]) -> NoReturn:
     if not normalized:
         raise OnevokeError(t(f"不支持的 Reviewer 角色: {role}", f"Unsupported Reviewer role: {role}"))
     config = effective_config(load_config())
+    if not force:
+        reason = lite_review_skip_reason(config, normalized, arguments[4])
+        if reason:
+            print(t(f"审核已跳过: {reason}", f"review skipped: {reason}"))
+            return
     reviewer = config["reviewers"][normalized]
     arguments[3] = normalized
     gate = review_gate()
@@ -1137,13 +1205,15 @@ def print_config(config: dict[str, Any]) -> None:
     print(f"{t('引导', 'welcome')}: {status}")
     print(f"{t('看板 Agent', 'kanban agent')}: {effective['kanban_agent']}")
     print(f"{t('启动方式', 'launcher')}: {effective['launcher']}")
+    print(f"{t('工作流', 'workflow')}: {format_workflow_summary(effective['workflow_mode'])}")
     kanban_entry = effective["models"]["kanban"][effective["kanban_agent"]]
     kanban_model = kanban_entry["model"] or t("(CLI 默认)", "(CLI default)")
     print(
         f"{t('看板模型', 'kanban model')}: {kanban_model}"
         f" ({t('大', 'large')} {kanban_entry['large_effort']} / {t('小', 'small')} {kanban_entry['small_effort']})"
     )
-    for role in REVIEW_ROLES:
+    visible_roles = ("QA",) if effective["workflow_mode"] == "lite" else REVIEW_ROLES
+    for role in visible_roles:
         reviewer = effective["reviewers"][role]
         review_entry = effective["models"]["review"][reviewer]
         model = review_entry["model"] or t("(CLI 默认)", "(CLI default)")
@@ -1166,7 +1236,10 @@ def parser() -> argparse.ArgumentParser:
     config = commands.add_parser("config", help=t("输出当前配置", "print the current configuration"))
     config.add_argument("--json", action="store_true", help=t("以 JSON 输出", "output JSON"))
     review = commands.add_parser("review", help=t("按配置选择 Reviewer", "select a Reviewer from configuration"))
+    review.add_argument("--force", action="store_true", help=t("强制运行被 Lite 策略跳过的审核", "force a review skipped by Lite policy"))
     review.add_argument("arguments", nargs=argparse.REMAINDER, metavar=t("参数", "arguments"))
+    mode = commands.add_parser("mode", help=t("查看或切换 Lite/Classic 工作流", "show or switch the Lite/Classic workflow"))
+    mode.add_argument("workflow_mode", nargs="?", choices=WORKFLOW_MODES)
     return result
 
 
@@ -1184,8 +1257,21 @@ def main() -> int:
             else:
                 print_config(config)
             return 0
+        if args.command == "mode":
+            config = load_config()
+            if args.workflow_mode is None:
+                print(config["workflow_mode"])
+                return 0
+            config["workflow_mode"] = args.workflow_mode
+            config["review_stages"] = default_review_stages(args.workflow_mode)
+            path = save_config(config)
+            print(t(
+                f"工作流已切换为 {args.workflow_mode}: {path}",
+                f"workflow switched to {args.workflow_mode}: {path}",
+            ))
+            return 0
         if args.command == "review":
-            command_review(args.arguments)
+            command_review((["--force"] if args.force else []) + args.arguments)
         return 0
     except KeyboardInterrupt:
         print(t("\nonevoke: 用户取消, 配置未更改", "\nonevoke: cancelled; configuration was not changed"), file=sys.stderr)

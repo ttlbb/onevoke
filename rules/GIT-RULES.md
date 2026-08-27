@@ -6,7 +6,9 @@
 
 - 分支模型固定为 `main` + `develop`: `main` 是稳定分支, `develop` 是唯一集成分支. 不读取项目级分支取值, 不询问用户选择分支模型, 不回落到 `refs/remotes/origin/HEAD` 或其他分支.
 - 初始化分支时, 有 `origin` 就先 fetch 并要求 `origin/main` 存在. `origin/develop` 不存在时: 本地也没有 `develop` 就从最新 `origin/main` 创建; 本地已有 `develop` 就先确认 `origin/main` 是它的祖先; 通过后普通 push 到 `origin/develop`, 不通过则停止并报告. 无 `origin` 或用户明确要求仅本地时, 要求本地 `main` 存在; 本地 `develop` 不存在时从 `main` 创建. `main` 不存在时停止并报告, 不猜测替代分支, 不重写历史.
-- 除下述 Markdown 直改路径外, 所有改文件任务都用独立任务分支和 `<仓库根目录>/worktrees/<task-name>/` 专用 worktree. `<task-name>` 同分支名, 短 kebab-case; 任务分支不得是 `develop` 或 detached `HEAD`. 已在当前任务专用 worktree 和任务分支时直接复用.
+- Classic 及 Lite L 任务除下述 Markdown 直改路径外, 都用独立任务分支和 `<仓库根目录>/worktrees/<task-name>/` 专用 worktree. `<task-name>` 同分支名, 短 kebab-case; 任务分支不得是 `develop` 或 detached `HEAD`. 已在当前任务专用 worktree 和任务分支时直接复用.
+- Lite S 默认直接使用当前工作树和当前分支，不创建 worktree；开始时工作树必须干净，且不得因此绕过 `main` 的稳定分支门禁. 当前有用户改动、分支不允许直接提交或任务升级时，改用独立任务分支/worktree.
+- Lite M 的 worktree 可选：涉及并行任务、跨模块修改、危险迁移、当前工作树不干净或需要隔离验证时使用；否则可在当前工作树执行. Lite L 一律强制独立任务分支/worktree. 卡片的 `工作树策略` 元数据为 `current|optional|required`，用户或项目规则可提高隔离级别.
 - 有 `origin` 且用户未要求仅本地集成时, 先 fetch, 再基于最新 `origin/develop` 建任务分支; fetch 失败则停止创建并报告. 无 `origin` 或用户明确要求仅本地集成时, 基于本地 `develop` 建任务分支, 报告未同步远端.
 
 ## Markdown 直改路径

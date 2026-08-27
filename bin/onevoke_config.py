@@ -59,6 +59,7 @@ EXECUTION_AGENTS = ("codex", "claude", "grok")
 REVIEW_AGENTS = ("codex", "claude", "grok")
 REVIEW_ROLES = ("PM", "CSA", "Hacker", "QA")
 REVIEW_STAGE_MODES = ("auto", "skip", "required")
+WORKFLOW_MODES = ("lite", "classic")
 LAUNCHERS = ("tmux", "tmux-session", "foreground", "console")
 LANGUAGES = ("cn", "en")
 # model 允许空字符串, 表示用对应 CLI 自己的默认模型.
@@ -500,7 +501,9 @@ def default_models() -> dict[str, Any]:
     }
 
 
-def default_review_stages() -> dict[str, str]:
+def default_review_stages(workflow_mode: str = "lite") -> dict[str, str]:
+    if workflow_mode == "lite":
+        return {"PM": "skip", "CSA": "skip", "Hacker": "skip", "QA": "auto"}
     return {role: "auto" for role in REVIEW_ROLES}
 
 
@@ -508,10 +511,11 @@ def default_config() -> dict[str, Any]:
     return {
         "schema_version": SCHEMA_VERSION,
         "welcome_complete": False,
+        "workflow_mode": "lite",
         "kanban_agent": "codex",
         "launcher": "console" if os.name == "nt" else "tmux",
         "reviewers": {role: "codex" for role in REVIEW_ROLES},
-        "review_stages": default_review_stages(),
+        "review_stages": default_review_stages("lite"),
         "models": default_models(),
         "memsearch": {"enabled": False},
         "language": "cn",
@@ -530,13 +534,13 @@ def _validate_choice(value: object, choices: tuple[str, ...], name: str) -> str:
     return value
 
 
-def _validate_review_stages(raw: object) -> dict[str, str]:
+def _validate_review_stages(raw: object, workflow_mode: str) -> dict[str, str]:
     if not isinstance(raw, dict):
         raise ConfigError(language_text(
             "review_stages 必须是 JSON object",
             "review_stages must be a JSON object",
         ))
-    stages = default_review_stages()
+    stages = default_review_stages(workflow_mode)
     unknown = set(raw) - set(REVIEW_ROLES)
     if unknown:
         raise ConfigError(language_text(
@@ -618,6 +622,11 @@ def validate_config(raw: object) -> dict[str, Any]:
     welcome_complete = raw.get("welcome_complete")
     if not isinstance(welcome_complete, bool):
         raise ConfigError(language_text("welcome_complete 必须是 boolean", "welcome_complete must be a boolean"))
+    # 配置 schema_version 保持 1. 老配置没有 workflow_mode, 按 classic 解释，
+    # 从而保留原来的多角色审核行为；新生成的配置显式写 lite.
+    workflow_mode = _validate_choice(
+        raw.get("workflow_mode", "classic"), WORKFLOW_MODES, "workflow_mode"
+    )
     kanban_agent = _validate_choice(raw.get("kanban_agent"), EXECUTION_AGENTS, "kanban_agent")
     launcher = _validate_choice(raw.get("launcher"), LAUNCHERS, "launcher")
 
@@ -630,9 +639,9 @@ def validate_config(raw: object) -> dict[str, Any]:
     }
 
     review_stages = (
-        _validate_review_stages(raw["review_stages"])
+        _validate_review_stages(raw["review_stages"], workflow_mode)
         if "review_stages" in raw
-        else default_review_stages()
+        else default_review_stages(workflow_mode)
     )
 
     models = _validate_models(raw["models"]) if "models" in raw else default_models()
@@ -646,6 +655,7 @@ def validate_config(raw: object) -> dict[str, Any]:
     return {
         "schema_version": SCHEMA_VERSION,
         "welcome_complete": welcome_complete,
+        "workflow_mode": workflow_mode,
         "kanban_agent": kanban_agent,
         "launcher": launcher,
         "reviewers": validated_reviewers,
@@ -710,7 +720,10 @@ def effective_config(config: dict[str, Any] | None = None) -> dict[str, Any]:
     loaded = load_config() if config is None else validate_config(config)
     if loaded["welcome_complete"]:
         return loaded
-    return default_config()
+    defaults = default_config()
+    defaults["workflow_mode"] = loaded["workflow_mode"]
+    defaults["review_stages"] = default_review_stages(loaded["workflow_mode"])
+    return defaults
 
 
 def save_config(config: dict[str, Any]) -> Path:

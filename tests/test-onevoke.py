@@ -75,6 +75,7 @@ class OnevokeCommandTest(unittest.TestCase):
         for name in (
             "onevoke",
             "kanban",
+            "kb",
             "onevoke-review.sh",
             "merge-worktree-memory.py",
             "codex",
@@ -369,6 +370,7 @@ class OnevokeCommandTest(unittest.TestCase):
         for name in (
             "onevoke",
             "kanban",
+            "kb",
             "onevoke-review.sh",
             "merge-worktree-memory.py",
         ):
@@ -399,6 +401,69 @@ class OnevokeCommandTest(unittest.TestCase):
         self.assertFalse(human.stdout.lstrip().startswith("{"))
         self.assertFalse(json.loads(machine.stdout)["welcome_complete"])
         self.assertEqual("cn", json.loads(machine.stdout)["language"])
+        self.assertEqual("lite", json.loads(machine.stdout)["workflow_mode"])
+        self.assertEqual(
+            {"PM": "skip", "CSA": "skip", "Hacker": "skip", "QA": "auto"},
+            json.loads(machine.stdout)["review_stages"],
+        )
+
+    def test_mode_switches_review_defaults_without_completing_welcome(self) -> None:
+        switched = self.run_command("mode", "classic")
+
+        self.assertEqual(0, switched.returncode, switched.stderr)
+        config = json.loads(self.config.read_text(encoding="utf-8"))
+        self.assertFalse(config["welcome_complete"])
+        self.assertEqual("classic", config["workflow_mode"])
+        self.assertEqual({role: "auto" for role in ROLES}, config["review_stages"])
+        self.assertEqual("classic\n", self.run_command("mode").stdout)
+        self.assertIn("PM=auto CSA=auto Hacker=auto QA=auto", self.run_command("config").stdout)
+
+    def test_legacy_config_uses_classic_mode(self) -> None:
+        legacy = {
+            "schema_version": 1,
+            "welcome_complete": True,
+            "kanban_agent": "codex",
+            "launcher": "tmux",
+            "reviewers": {role: "codex" for role in ROLES},
+            "memsearch": {"enabled": False},
+        }
+        self.config.parent.mkdir(parents=True)
+        self.config.write_text(json.dumps(legacy), encoding="utf-8")
+
+        config = json.loads(self.run_command("config", "--json").stdout)
+
+        self.assertEqual("classic", config["workflow_mode"])
+        self.assertEqual({role: "auto" for role in ROLES}, config["review_stages"])
+
+    def test_lite_review_dispatch_skips_s_and_non_qa_roles(self) -> None:
+        small = self.root / "small-task.md"
+        medium = self.root / "medium-task.md"
+        small.write_text("# Small\n\n- 规模: S\n", encoding="utf-8")
+        medium.write_text("# Medium\n\n- 规模: M\n", encoding="utf-8")
+
+        skipped_small = self.run_command(
+            "review", "/tmp/worktree", "base", "commit", "QA", str(small)
+        )
+        skipped_pm = self.run_command(
+            "review", "/tmp/worktree", "base", "commit", "PM", str(medium)
+        )
+
+        self.assertEqual(0, skipped_small.returncode, skipped_small.stderr)
+        self.assertIn("Lite S 任务默认不审核", skipped_small.stdout)
+        self.assertEqual(0, skipped_pm.returncode, skipped_pm.stderr)
+        self.assertIn("Lite M 任务只运行 QA", skipped_pm.stdout)
+
+    def test_force_review_overrides_lite_size_policy(self) -> None:
+        self.install_fake_environment(tmux=True)
+        small = self.root / "small-task.md"
+        small.write_text("# Small\n\n- 规模: S\n", encoding="utf-8")
+
+        forced = self.run_command(
+            "review", "--force", "/tmp/worktree", "base", "commit", "QA", str(small)
+        )
+
+        self.assertEqual(0, forced.returncode, forced.stderr)
+        self.assertIn("onevoke-review.sh test-version", forced.stdout)
 
     def test_config_language_overrides_env_without_cli(self) -> None:
         config = {
@@ -560,10 +625,10 @@ class OnevokeCommandTest(unittest.TestCase):
         self.assertEqual(0, returncode, output)
         config = json.loads(self.config.read_text(encoding="utf-8"))
         self.assertEqual("skip", config["review_stages"]["CSA"])
-        for role in ROLES:
-            if role == "CSA":
-                continue
-            self.assertEqual("auto", config["review_stages"][role], role)
+        self.assertEqual(
+            {"PM": "skip", "CSA": "skip", "Hacker": "skip", "QA": "auto"},
+            config["review_stages"],
+        )
 
     def test_welcome_reset_changes_one_item_and_keeps_other_values(self) -> None:
         self.install_fake_environment(tmux=True)
@@ -767,7 +832,7 @@ class OnevokeCommandTest(unittest.TestCase):
             sys.path.pop(0)
 
         self.assertEqual(
-            {role: "auto" for role in ROLES},
+            {"PM": "skip", "CSA": "skip", "Hacker": "skip", "QA": "auto"},
             onevoke_config.default_review_stages(),
         )
         validated = onevoke_config.validate_config({
@@ -1499,7 +1564,7 @@ class ProjectOnevokeRuntimeTest(unittest.TestCase):
             encoding="utf-8",
         )
         if commands:
-            for name in ("kanban", "merge-worktree-memory.py"):
+            for name in ("kanban", "kb", "merge-worktree-memory.py"):
                 command = bin_dir / name
                 command.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
                 command.chmod(0o755)
