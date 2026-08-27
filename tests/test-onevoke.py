@@ -245,14 +245,15 @@ class OnevokeCommandTest(unittest.TestCase):
     def test_welcome_saves_per_role_reviewers_and_foreground_launcher(self) -> None:
         self.install_fake_environment(tmux=False)
 
-        # 只修改三个 Reviewer 和 MemSearch, 其余选项保留当前值.
+        # 切到 Classic 后修改三个 Reviewer 和 MemSearch, 其余选项保留当前值.
         returncode, output = self.run_on_tty(
-            "2\n2\n3\n3\n5\n2\n8\nyes\n\n", "welcome"
+            "11\n2\n2\n2\n3\n3\n5\n2\n8\nyes\n\n", "welcome"
         )
 
         self.assertEqual(0, returncode, output)
         self.assertIn("\033[1;31m[!] 未安装 tmux", output)
         config = json.loads(self.config.read_text(encoding="utf-8"))
+        self.assertEqual("classic", config["workflow_mode"])
         self.assertEqual("codex", config["kanban_agent"])
         self.assertEqual("foreground", config["launcher"])
         self.assertEqual(
@@ -417,6 +418,29 @@ class OnevokeCommandTest(unittest.TestCase):
         self.assertEqual({role: "auto" for role in ROLES}, config["review_stages"])
         self.assertEqual("classic\n", self.run_command("mode").stdout)
         self.assertIn("PM=auto CSA=auto Hacker=auto QA=auto", self.run_command("config").stdout)
+
+    def test_mode_switch_to_lite_replaces_active_grok_roles(self) -> None:
+        classic = {
+            "schema_version": 1,
+            "welcome_complete": True,
+            "workflow_mode": "classic",
+            "kanban_agent": "grok",
+            "launcher": "foreground",
+            "reviewers": {role: "grok" for role in ROLES},
+            "review_stages": {role: "auto" for role in ROLES},
+            "memsearch": {"enabled": False},
+        }
+        self.config.parent.mkdir(parents=True)
+        self.config.write_text(json.dumps(classic), encoding="utf-8")
+
+        switched = self.run_command("mode", "lite")
+
+        self.assertEqual(0, switched.returncode, switched.stderr)
+        config = json.loads(self.config.read_text(encoding="utf-8"))
+        self.assertEqual("lite", config["workflow_mode"])
+        self.assertEqual("codex", config["kanban_agent"])
+        self.assertEqual("codex", config["reviewers"]["QA"])
+        self.assertEqual("grok", config["reviewers"]["PM"])
 
     def test_legacy_config_uses_classic_mode(self) -> None:
         legacy = {
@@ -765,7 +789,7 @@ class OnevokeCommandTest(unittest.TestCase):
         returncode, output = self.run_on_tty("", "welcome")
 
         self.assertEqual(1, returncode, output)
-        self.assertIn("没有发现可用的 Agent", output)
+        self.assertIn("当前工作流没有可用的 Agent", output)
         self.assertFalse(self.config.exists())
 
     def test_yes_no_uses_text_input_and_enter_uses_default(self) -> None:
@@ -871,6 +895,17 @@ class OnevokeCommandTest(unittest.TestCase):
                 "review_stages": {"PM": "always"},
                 "memsearch": {"enabled": False},
             })
+
+        for invalid_field in ("kanban_agent", "QA"):
+            lite = onevoke_config.default_config()
+            lite["welcome_complete"] = True
+            if invalid_field == "kanban_agent":
+                lite["kanban_agent"] = "grok"
+            else:
+                lite["reviewers"]["QA"] = "grok"
+            with self.subTest(lite_agent_field=invalid_field):
+                with self.assertRaises(onevoke_config.ConfigError):
+                    onevoke_config.validate_config(lite)
 
         for invalid in (None, "auto", []):
             with self.subTest(review_stages=invalid):
@@ -1061,17 +1096,14 @@ class OnevokeCommandTest(unittest.TestCase):
         self.install_fake_environment(tmux=False)
         self.fake_command("codex", "#!/bin/sh\nexit 1\n")
         self.fake_command("claude", "#!/bin/sh\nexit 1\n")
-        # Only grok reports a version; four reviewers must also be usable.
-
-        # 仅 Grok 可用, 直接保存自动选出的当前值.
+        # Only Grok reports a version, which is intentionally not a Lite role.
         returncode, output = self.run_on_tty("\n", "welcome")
 
-        self.assertEqual(0, returncode, output)
+        self.assertEqual(1, returncode, output)
         self.assertIn("--version 失败", output)
         self.assertIn("不可作为新选择", output)
-        config = json.loads(self.config.read_text(encoding="utf-8"))
-        self.assertEqual("grok", config["kanban_agent"])
-        self.assertFalse(config["memsearch"]["enabled"])
+        self.assertIn("Lite 请安装 Codex 或 Claude", output)
+        self.assertFalse(self.config.exists())
 
     def test_rules_integration_accepts_production_entry_with_internal_bu_shi_yong(
         self,

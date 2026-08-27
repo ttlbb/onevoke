@@ -48,7 +48,7 @@
 
 - 新安装默认 `lite`; 没有 `workflow_mode` 的旧版 schema 1 配置按 `classic` 解释，保持原行为. 用命令根下的 `onevoke mode [lite|classic]` 查看或切换.
 - Lite 是 Classic 的兼容层: `kb` 提供日常入口，底层仍使用同一份 `kanban/`、六状态目录、配置和审核门禁，不复制或迁移数据.
-- Lite 只有 Executor 与 QA Reviewer 两类日常角色，优先使用 Codex 或 Claude. Classic 继续支持 PM/CSA/Hacker/QA 分角色配置及 Grok.
+- Lite 只有 Executor 与 QA Reviewer 两类日常角色，活跃角色只从 Codex 或 Claude 中选择. Classic 继续支持 PM/CSA/Hacker/QA 分角色配置及 Grok.
 - Lite 任务规模策略: S 跳过审核、当前分支；M 一次 QA、worktree 可选；L 一次 QA、强制 worktree 和 `spec.md`. 用户指令和项目规则可明确覆盖；强制调用被 Lite 跳过的审核使用 `onevoke review --force ...`.
 
 ### 分支

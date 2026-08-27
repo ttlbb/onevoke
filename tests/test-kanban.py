@@ -632,6 +632,8 @@ printf '%s\\n' '@9'
     def test_start_with_grok_launches_bypass_permission_session(self) -> None:
         task_id, task = self.make_todo("start-grok")
         fake_bin = self.install_fake_launchers()
+        # 缺少 workflow_mode 的旧配置按 Classic 解释并继续支持 Grok.
+        self.write_onevoke_config("grok", "tmux")
 
         result = self.run_command("start", "--agent", "grok", task_id)
 
@@ -645,6 +647,15 @@ printf '%s\\n' '@9'
         self.assertNotIn("--effort xhigh", command)
         self.assertIn("--permission-mode bypassPermissions", command)
         self.assertIn(task_id, command)
+
+    def test_lite_start_rejects_grok_override(self) -> None:
+        task_id, task = self.make_todo("lite-grok")
+        self.install_fake_launchers()
+
+        result = self.run_command("start", "--agent", "grok", task_id, succeeds=False)
+
+        self.assertIn("Lite 模式只支持 Codex 或 Claude Executor", result.stderr)
+        self.assertTrue(task.exists())
 
     def test_start_uses_configured_models_and_efforts(self) -> None:
         task_id, _ = self.make_todo("custom-model")

@@ -1367,10 +1367,10 @@ def command_start(args: argparse.Namespace, root: Path) -> None:
     config = effective_config(load_config())
     agent_name = args.agent or config["kanban_agent"]
     lite = getattr(args, "lite", False) or config["workflow_mode"] == "lite"
-    if getattr(args, "lite", False) and agent_name not in ("codex", "claude"):
+    if lite and agent_name not in ("codex", "claude"):
         raise KanbanError(t(
-            "Lite 模式只支持 Codex 或 Claude Executor; 请用 --agent 覆盖或切换 Classic",
-            "Lite mode supports only Codex or Claude executors; override --agent or switch to Classic",
+            "Lite 模式只支持 Codex 或 Claude Executor; 请改用其中之一或切换 Classic",
+            "Lite mode supports only Codex or Claude executors; use one of them or switch to Classic",
         ))
     launcher = args.launcher or config["launcher"]
     if os.name == "nt" and launcher in ("tmux", "tmux-session"):

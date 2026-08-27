@@ -57,6 +57,7 @@ PROJECT_GIT_EXCLUDE_PATTERN = "/.onevoke/"
 InstallMode = Literal["global", "project"]
 EXECUTION_AGENTS = ("codex", "claude", "grok")
 REVIEW_AGENTS = ("codex", "claude", "grok")
+LITE_AGENTS = ("codex", "claude")
 REVIEW_ROLES = ("PM", "CSA", "Hacker", "QA")
 REVIEW_STAGE_MODES = ("auto", "skip", "required")
 WORKFLOW_MODES = ("lite", "classic")
@@ -637,6 +638,16 @@ def validate_config(raw: object) -> dict[str, Any]:
         role: _validate_choice(reviewers.get(role), REVIEW_AGENTS, f"reviewers.{role}")
         for role in REVIEW_ROLES
     }
+    if workflow_mode == "lite" and kanban_agent not in LITE_AGENTS:
+        raise ConfigError(language_text(
+            "Lite 的 kanban_agent 只支持 codex 或 claude",
+            "Lite kanban_agent supports only codex or claude",
+        ))
+    if workflow_mode == "lite" and validated_reviewers["QA"] not in LITE_AGENTS:
+        raise ConfigError(language_text(
+            "Lite 的 QA Reviewer 只支持 codex 或 claude",
+            "Lite QA Reviewer supports only codex or claude",
+        ))
 
     review_stages = (
         _validate_review_stages(raw["review_stages"], workflow_mode)

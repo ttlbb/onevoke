@@ -4,7 +4,7 @@
 
 ## Reviewer 选择
 
-- Lite 日常只配置 Executor 与 QA Reviewer，推荐 Codex 或 Claude；`PM`, `CSA`, `Hacker` 兼容字段保留但默认跳过. Classic 继续支持下述三种 reviewer 和四角色独立选择.
+- Lite 日常只配置 Executor 与 QA Reviewer，活跃角色只从 Codex 或 Claude 中选择；`PM`, `CSA`, `Hacker` 兼容字段保留但默认跳过. Classic 继续支持下述三种 reviewer 和四角色独立选择.
 - 支持 Codex, Claude 与 Grok 三个 reviewer. POSIX 的平台公开审核入口是命令根下的 `onevoke-review.sh`; 原生 Windows 的人工交互入口是命令根下的 `onevoke-review.cmd`, 命令根下的 `onevoke review` 的程序化分发直接进入同目录的 `onevoke_review.py`. 这些路径共享单一门禁实现. Windows Reviewer CLI 必须解析为原生 `.exe`, `.cmd`/`.bat` 一律视为不可用. 除下表的 CLI 与隔离参数外, 本文件全部规则对三者一致. 新增 reviewer 时扩展 Python 实现的 agent 适配层和配置枚举, 不新增按 agent 命名的脚本. 项目安装必须使用命令根绝对入口, 禁止改用 PATH 中的全局同名命令.
 
 | reviewer | agent 参数 | CLI | 入口的隔离参数 |

@@ -16,6 +16,7 @@ from onevoke_config import (
     ARGPARSE_ZH,
     EXECUTION_AGENTS,
     LANGUAGES,
+    LITE_AGENTS,
     REVIEW_AGENTS,
     REVIEW_ROLES,
     REVIEW_STAGE_MODES,
@@ -729,7 +730,12 @@ def edit_models(config: dict[str, Any]) -> None:
             t("小任务推理档位?", "Reasoning effort for small tasks?"),
         ),
     ]
-    for reviewer in dict.fromkeys(config["reviewers"].values()):
+    active_reviewers = (
+        (config["reviewers"]["QA"],)
+        if config["workflow_mode"] == "lite"
+        else tuple(dict.fromkeys(config["reviewers"].values()))
+    )
+    for reviewer in active_reviewers:
         entry = config["models"]["review"][reviewer]
         label = AGENT_LABELS[reviewer]
         fields.extend(
@@ -962,25 +968,33 @@ def configure_welcome(existing: dict[str, Any], *, config_valid: bool) -> dict[s
                     f"{AGENT_LABELS[name]} --version failed; unavailable as a new choice: {state['path']}",
                 )
             )
-    execution_choices = [
-        (name, f"{AGENT_LABELS[name]} ({state['version']})")
-        for name, state in agents.items()
-        if agent_usable(state)
-    ]
-    if not execution_choices and not existing["welcome_complete"]:
+
+    def available_choices(names: tuple[str, ...]) -> list[tuple[str, str]]:
+        return [
+            (name, f"{AGENT_LABELS[name]} ({agents[name]['version']})")
+            for name in names
+            if agent_usable(agents[name])
+        ]
+
+    def execution_choices(workflow_mode: str) -> list[tuple[str, str]]:
+        names = LITE_AGENTS if workflow_mode == "lite" else EXECUTION_AGENTS
+        return available_choices(names)
+
+    def review_choices(workflow_mode: str) -> list[tuple[str, str]]:
+        names = LITE_AGENTS if workflow_mode == "lite" else REVIEW_AGENTS
+        return available_choices(names)
+
+    initial_execution_choices = execution_choices(existing["workflow_mode"])
+    if not initial_execution_choices and not existing["welcome_complete"]:
         raise OnevokeError(
             t(
-                "没有发现可用的 Agent (--version 须成功). 请先安装 Codex、Claude 或 Grok.",
-                "No usable Agent found (--version must succeed). Install Codex, Claude, or Grok first.",
+                "当前工作流没有可用的 Agent (--version 须成功). Lite 请安装 Codex 或 Claude.",
+                "No usable Agent was found for this workflow (--version must succeed). Install Codex or Claude for Lite.",
             )
         )
-    review_choices = [
-        (name, f"{AGENT_LABELS[name]} ({agents[name]['version']})")
-        for name in REVIEW_AGENTS
-        if agent_usable(agents[name])
-    ]
-    if not review_choices and not existing["welcome_complete"]:
-        raise OnevokeError(t("没有发现可用 Reviewer. 请安装 Codex、Claude 或 Grok.", "No usable Reviewer found. Install Codex, Claude, or Grok."))
+    initial_review_choices = review_choices(existing["workflow_mode"])
+    if not initial_review_choices and not existing["welcome_complete"]:
+        raise OnevokeError(t("当前工作流没有可用 Reviewer. Lite 请安装 Codex 或 Claude.", "No usable Reviewer was found for this workflow. Install Codex or Claude for Lite."))
 
     config = default_config()
     config["workflow_mode"] = existing["workflow_mode"]
@@ -990,12 +1004,12 @@ def configure_welcome(existing: dict[str, Any], *, config_valid: bool) -> dict[s
     }
     config["kanban_agent"] = existing["kanban_agent"]
     if not existing["welcome_complete"] and not agent_usable(agents.get(config["kanban_agent"], {})):
-        config["kanban_agent"] = execution_choices[0][0]
+        config["kanban_agent"] = initial_execution_choices[0][0]
     for role in REVIEW_ROLES:
         previous = existing["reviewers"][role]
         config["reviewers"][role] = previous
         if not existing["welcome_complete"] and not agent_usable(agents.get(previous, {})):
-            config["reviewers"][role] = review_choices[0][0]
+            config["reviewers"][role] = initial_review_choices[0][0]
     config["launcher"] = existing["launcher"]
     if os.name == "nt" and config["launcher"] not in ("console", "foreground") and not existing["welcome_complete"]:
         config["launcher"] = "console"
@@ -1027,16 +1041,18 @@ def configure_welcome(existing: dict[str, Any], *, config_valid: bool) -> dict[s
         if action == "cancel":
             raise OnevokeError(t("用户取消, 配置未更改", "Cancelled; configuration was not changed"))
         if action == "1":
+            choices = execution_choices(config["workflow_mode"])
             config["kanban_agent"] = ask_choice(
                 t("kanban 默认用哪个 Agent 执行任务?", "Which Agent should kanban use by default?"),
-                choices_with_current(execution_choices, config["kanban_agent"]),
+                choices_with_current(choices, config["kanban_agent"]),
                 config["kanban_agent"],
             )
         elif action in ("2", "3", "4", "5"):
             role = REVIEW_ROLES[int(action) - 2]
+            choices = review_choices(config["workflow_mode"])
             config["reviewers"][role] = ask_choice(
                 t(f"{role} 使用哪个 Reviewer?", f"Which Reviewer should {role} use?"),
-                choices_with_current(review_choices, config["reviewers"][role]),
+                choices_with_current(choices, config["reviewers"][role]),
                 config["reviewers"][role],
             )
         elif action == "6":
@@ -1072,8 +1088,21 @@ def configure_welcome(existing: dict[str, Any], *, config_valid: bool) -> dict[s
                 config["workflow_mode"],
             )
             if workflow_mode != config["workflow_mode"]:
+                choices = execution_choices(workflow_mode)
+                reviewers = review_choices(workflow_mode)
+                if not choices or not reviewers:
+                    warning(t(
+                        f"无法切换到 {workflow_mode}: 没有兼容且可用的 Agent.",
+                        f"Cannot switch to {workflow_mode}: no compatible Agent is available.",
+                    ))
+                    continue
                 config["workflow_mode"] = workflow_mode
                 config["review_stages"] = default_review_stages(workflow_mode)
+                if workflow_mode == "lite":
+                    if config["kanban_agent"] not in LITE_AGENTS:
+                        config["kanban_agent"] = choices[0][0]
+                    if config["reviewers"]["QA"] not in LITE_AGENTS:
+                        config["reviewers"]["QA"] = reviewers[0][0]
 
     selected_agent = config["kanban_agent"]
     entry = rules_entry()
@@ -1264,6 +1293,11 @@ def main() -> int:
                 return 0
             config["workflow_mode"] = args.workflow_mode
             config["review_stages"] = default_review_stages(args.workflow_mode)
+            if args.workflow_mode == "lite":
+                if config["kanban_agent"] not in LITE_AGENTS:
+                    config["kanban_agent"] = "codex"
+                if config["reviewers"]["QA"] not in LITE_AGENTS:
+                    config["reviewers"]["QA"] = "codex"
             path = save_config(config)
             print(t(
                 f"工作流已切换为 {args.workflow_mode}: {path}",

@@ -90,7 +90,7 @@ kb list
 | M | 单文件轻量卡 | 一次 QA | 可选 worktree |
 | L | 目录卡，强制 `spec.md` | 一次 QA | 强制 worktree |
 
-Lite 默认只启用 Executor + QA Reviewer，PM/CSA/Hacker 为 `skip`；Codex 与 Claude 是推荐的 Executor/Reviewer. 用户或项目规则明确要求审核时，可用 `onevoke review --force ...` 覆盖规模策略.
+Lite 默认只启用 Executor + QA Reviewer，PM/CSA/Hacker 为 `skip`；活跃的 Executor/Reviewer 只从 Codex 与 Claude 中选择. Grok 配置保留给 Classic. 用户或项目规则明确要求审核时，可用 `onevoke review --force ...` 覆盖规模策略.
 
 查看或切换模式：
 
