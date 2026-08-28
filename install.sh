@@ -411,7 +411,7 @@ EOF
     if [ "$project_rules_created" -eq 1 ]; then
       printf '%s\n' "Codex 项目规则已接入: $project_agent_rules" >&2
     else
-      printf '%s\n' "保留现有项目规则入口: $project_agent_rules; 请在其中明确要求读取并遵守 .onevoke/rules/ONEVOKE-AGENTS.md" >&2
+      printf '%s\n' "保留现有项目规则入口: $project_agent_rules; 请用项目 onevoke doctor 核验接入状态" >&2
     fi
     printf '%s\n' \
       "项目安装完成, 未修改 PATH, 也未改动全局 Onevoke 安装." \
@@ -421,7 +421,7 @@ EOF
     if [ "$project_rules_created" -eq 1 ]; then
       printf '%s\n' "Codex project rules connected: $project_agent_rules" >&2
     else
-      printf '%s\n' "Existing project rules entry kept: $project_agent_rules; explicitly require reading and following .onevoke/rules/ONEVOKE-AGENTS.md" >&2
+      printf '%s\n' "Existing project rules entry kept: $project_agent_rules; verify it with the project onevoke doctor" >&2
     fi
     printf '%s\n' \
       "Project install finished; PATH and the global Onevoke install were not changed." \

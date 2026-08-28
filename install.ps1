@@ -511,7 +511,7 @@ try {
       if ($projectRulesCreated) {
         Write-Stderr "Codex 项目规则已接入: $projectAgentRules"
       } else {
-        Write-Stderr "保留现有项目规则入口: $projectAgentRules; 请在其中明确要求读取并遵守 .onevoke/rules/ONEVOKE-AGENTS.md"
+        Write-Stderr "保留现有项目规则入口: $projectAgentRules; 请用项目 onevoke doctor 核验接入状态"
       }
       Write-Stderr "项目安装完成, 未修改 PATH, 也未改动全局 Onevoke 安装."
       Write-Stderr "请使用以下绝对路径."
@@ -520,7 +520,7 @@ try {
       if ($projectRulesCreated) {
         Write-Stderr "Codex project rules connected: $projectAgentRules"
       } else {
-        Write-Stderr "Existing project rules entry kept: $projectAgentRules; explicitly require reading and following .onevoke/rules/ONEVOKE-AGENTS.md"
+        Write-Stderr "Existing project rules entry kept: $projectAgentRules; verify it with the project onevoke doctor"
       }
       Write-Stderr "Project install finished; PATH and the global Onevoke install were not changed."
       Write-Stderr "Use the absolute paths below."
