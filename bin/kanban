@@ -2088,6 +2088,7 @@ def parser() -> argparse.ArgumentParser:
         if LITE_ENTRY
         else t("本地文件看板", "Local file kanban board"),
     )
+    agent_choices = ("codex", "claude") if LITE_ENTRY else AGENT_NAMES
     result.add_argument("--lang", choices=LANGUAGES, help=t("覆盖输出语言", "override the output language"))
     result.add_argument("--lite", action="store_true", help=argparse.SUPPRESS)
     commands = result.add_subparsers(dest="command", required=True)
@@ -2131,7 +2132,7 @@ def parser() -> argparse.ArgumentParser:
 
     start_parser = commands.add_parser("start", help=t("领取任务并按 Onevoke 配置启动 Agent", "claim a task and launch an Agent using Onevoke configuration"))
     start_parser.add_argument("task", nargs="?", metavar=t("任务", "task"))
-    start_parser.add_argument("--agent", choices=AGENT_NAMES, help=t("覆盖配置中的默认 Agent", "override the configured default Agent"))
+    start_parser.add_argument("--agent", choices=agent_choices, help=t("覆盖配置中的默认 Agent", "override the configured default Agent"))
     start_parser.add_argument(
         "--launcher", choices=LAUNCHERS, help=t("覆盖配置中的启动方式", "override the configured launcher")
     )
@@ -2149,7 +2150,7 @@ def parser() -> argparse.ArgumentParser:
     do_parser.add_argument("--size", type=str.upper, choices=TASK_SIZES, default="S", help=t("新任务规模, 默认 S", "new-task size; default S"))
     do_parser.add_argument("--type", choices=tuple(TYPE_NAMES), default="chore", help=t("新任务类型, 默认 chore", "new-task type; default chore"))
     do_parser.add_argument("--slug", help=t("新任务 slug", "new-task slug"))
-    do_parser.add_argument("--agent", choices=AGENT_NAMES, help=t("覆盖配置中的默认 Agent", "override the configured default Agent"))
+    do_parser.add_argument("--agent", choices=agent_choices, help=t("覆盖配置中的默认 Agent", "override the configured default Agent"))
     do_parser.add_argument("--launcher", choices=LAUNCHERS, help=t("覆盖配置中的启动方式", "override the configured launcher"))
     do_parser.add_argument(
         "--worktree",

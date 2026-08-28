@@ -696,6 +696,15 @@ printf '%s\\n' '@9'
         self.assertIn("Lite 模式只支持 Codex 或 Claude Executor", result.stderr)
         self.assertTrue(task.exists())
 
+    def test_kb_help_only_lists_lite_executor_choices(self) -> None:
+        start_help = self.run_kb("start", "--help")
+        do_help = self.run_kb("do", "--help")
+
+        self.assertIn("--agent {codex,claude}", start_help.stdout)
+        self.assertIn("--agent {codex,claude}", do_help.stdout)
+        self.assertNotIn("grok", start_help.stdout)
+        self.assertNotIn("grok", do_help.stdout)
+
     def test_lite_large_start_creates_task_worktree_and_records_branch(self) -> None:
         project, board = self.make_git_project_board()
         self.install_fake_launchers()
