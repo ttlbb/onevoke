@@ -4279,8 +4279,14 @@ class PosixProjectInstallerTest(unittest.TestCase):
         agent_rules = dest_rules / "AGENTS.md"
         self.assertTrue(agent_rules.is_symlink())
         self.assertEqual(Path("ONEVOKE-AGENTS.md"), agent_rules.readlink())
+        project_rules = project / "AGENTS.md"
+        self.assertTrue(project_rules.is_symlink())
+        self.assertEqual(
+            Path(".onevoke/rules/ONEVOKE-AGENTS.md"), project_rules.readlink()
+        )
         exclude = (project / ".git" / "info" / "exclude").read_text(encoding="utf-8")
         self.assertEqual(1, exclude.splitlines().count("/.onevoke/"))
+        self.assertEqual(1, exclude.splitlines().count("/AGENTS.md"))
         return dest_bin
 
     def assert_command_paths(self, stdout: str, dest_bin: Path) -> None:
@@ -4348,6 +4354,35 @@ class PosixProjectInstallerTest(unittest.TestCase):
         self.assert_command_paths(second.stdout, dest_bin)
         self.assertEqual("keep-me\n", notes.read_text(encoding="utf-8"))
         self.assertEqual(original_mode, exclude.stat().st_mode & 0o777)
+
+    def test_project_install_preserves_existing_project_agents_file(self) -> None:
+        project = self.init_git_repo(self.root / "app")
+        project_rules = project / "AGENTS.md"
+        project_rules.write_text("# existing project rules\n", encoding="utf-8")
+
+        result = self.run_installer("--project", str(project))
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual(
+            "# existing project rules\n",
+            project_rules.read_text(encoding="utf-8"),
+        )
+        self.assertFalse(project_rules.is_symlink())
+        self.assertIn("保留现有项目规则入口", result.stderr)
+        exclude = (project / ".git" / "info" / "exclude").read_text(
+            encoding="utf-8"
+        )
+        self.assertNotIn("/AGENTS.md", exclude.splitlines())
+
+    def test_project_install_rejects_project_agents_directory_before_writes(self) -> None:
+        project = self.init_git_repo(self.root / "app")
+        (project / "AGENTS.md").mkdir()
+
+        result = self.run_installer("--project", str(project))
+
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("安装目标是目录", result.stderr)
+        self.assertFalse((project / ".onevoke").exists())
 
     def test_project_install_does_not_read_global_config_language(self) -> None:
         project = self.init_git_repo(self.root / "app")

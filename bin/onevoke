@@ -230,9 +230,16 @@ def _strip_comments_and_fences(text: str) -> str:
 
 
 _NEGATION_RE = re.compile(
-    r"(禁用|废弃|停用|不要遵守|勿遵守|不遵守|不要使用|不使用|请勿使用|"
+    r"(禁用|废弃|停用|不要读取|勿读取|不读取|不要遵守|勿遵守|不遵守|"
+    r"不要使用|不使用|请勿使用|"
     r"未导入|尚未导入|不再生效|已失效|请忽略|"
-    r"do not follow|do not use|disabled|deprecated|\bignore\b)",
+    r"do not read|do not follow|do not load|do not import|do not use|"
+    r"disabled|deprecated|\bignore\b)",
+    flags=re.IGNORECASE,
+)
+
+_PROJECT_RULES_VERB_RE = re.compile(
+    r"(读取|阅读|遵守|加载|导入|使用|read|follow|load|import|use)",
     flags=re.IGNORECASE,
 )
 
@@ -338,9 +345,53 @@ def _merged_rules_present(text: str, entry: Path) -> bool:
     return True
 
 
+def _project_rules_reference_present(
+    text: str, entry: Path, project_root: Path
+) -> bool:
+    """识别项目 AGENTS.md 中对 Onevoke 规则入口的明确正向引用."""
+    candidates = _rule_entry_candidates(entry)
+    try:
+        relative = entry.relative_to(project_root)
+        relative_text = relative.as_posix()
+        candidates.add(relative_text)
+        candidates.add(f"./{relative_text}")
+    except ValueError:
+        pass
+
+    body = _strip_comments_and_fences(text)
+    offset = 0
+    for raw in body.splitlines(keepends=True):
+        line = raw.strip()
+        line_start = offset
+        offset += len(raw)
+        if not line or line.startswith("#"):
+            continue
+        for candidate in candidates:
+            index = line.find(candidate)
+            if index < 0 or not _PROJECT_RULES_VERB_RE.search(line):
+                continue
+            absolute_start = line_start + raw.find(line) + index
+            context = _candidate_context(
+                body, absolute_start, absolute_start + len(candidate)
+            )
+            if not _NEGATION_RE.search(context):
+                return True
+    return False
+
+
 def rules_integration(agent: str) -> tuple[bool, str]:
     entry = rules_entry()
-    if agent == "codex":
+    paths = current_paths()
+    if paths.mode == "project":
+        if paths.project_root is None:
+            return False, t(
+                "项目安装路径缺少主 worktree",
+                "project install paths are missing the main worktree",
+            )
+        target = paths.project_root / (
+            "CLAUDE.md" if agent == "claude" else "AGENTS.md"
+        )
+    elif agent == "codex":
         target = Path.home() / ".codex" / "AGENTS.md"
     elif agent == "claude":
         target = Path.home() / ".claude" / "CLAUDE.md"
@@ -348,6 +399,7 @@ def rules_integration(agent: str) -> tuple[bool, str]:
         target = Path.home() / ".grok" / "AGENTS.md"
     if not target.exists() and not target.is_symlink():
         return False, t(f"未发现 {target}", f"not found: {target}")
+    project_symlink_mismatch = False
     try:
         if target.is_symlink():
             linked = target.resolve()
@@ -357,16 +409,16 @@ def rules_integration(agent: str) -> tuple[bool, str]:
             # Codex/Grok 用软链接入入口. 项目与全局共用同一套规则正文,
             # 跟随指向全局入口的软链再做全文包含会误判. Claude 是 @ 导入,
             # CLAUDE.md 本身常软链到 dotfiles, 不得套用这条短路.
-            if current_paths().mode == "project" and agent != "claude":
-                return False, t(
-                    f"{target} 未指向项目规则入口 {entry}",
-                    f"{target} does not point to the project rules entry {entry}",
-                )
+            project_symlink_mismatch = paths.mode == "project" and agent != "claude"
         text = target.read_text(encoding="utf-8")
     except (OSError, UnicodeError):
         return False, t(f"无法读取 {target}", f"cannot read: {target}")
     if agent == "claude":
         integrated = _claude_rules_import_present(text, entry)
+    elif paths.mode == "project" and paths.project_root is not None:
+        integrated = _project_rules_reference_present(
+            text, entry, paths.project_root
+        ) or (not project_symlink_mismatch and _merged_rules_present(text, entry))
     else:
         integrated = _merged_rules_present(text, entry)
     if integrated:
@@ -377,7 +429,7 @@ def rules_integration(agent: str) -> tuple[bool, str]:
     )
 
 
-def print_doctor() -> bool:
+def print_doctor(*, check_project_rules: bool = False) -> bool:
     healthy = True
     print(t("Onevoke 环境检查", "Onevoke environment check"), file=sys.stderr)
     paths = current_paths()
@@ -467,6 +519,20 @@ def print_doctor() -> bool:
             print(t(f"[-] 配置: 尚未完成 ({config_path()})", f"[-] config: incomplete ({config_path()})"), file=sys.stderr)
         # 无论 welcome 是否完成, 都校验 effective_config 指向的实际资源.
         healthy = validate_configured_resources(config, agents) and healthy
+        if check_project_rules and paths.mode == "project":
+            selected_agent = effective_config(config)["kanban_agent"]
+            integrated, detail = rules_integration(selected_agent)
+            if integrated:
+                success(t(
+                    f"{AGENT_LABELS[selected_agent]} 已接入 Onevoke 规则: {detail}",
+                    f"{AGENT_LABELS[selected_agent]} is connected to Onevoke rules: {detail}",
+                ))
+            else:
+                healthy = False
+                warning(t(
+                    f"{AGENT_LABELS[selected_agent]} 尚未接入 Onevoke 规则: {detail}",
+                    f"{AGENT_LABELS[selected_agent]} is not connected to Onevoke rules: {detail}",
+                ))
     return healthy
 
 
@@ -1278,7 +1344,7 @@ def main() -> int:
         if args.command == "welcome":
             return command_welcome(args.reset)
         if args.command == "doctor":
-            return 0 if print_doctor() else 1
+            return 0 if print_doctor(check_project_rules=True) else 1
         if args.command == "config":
             config = load_config()
             if args.json:

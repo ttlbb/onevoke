@@ -3,7 +3,7 @@
 - 规则集入口: 本文件 `ONEVOKE-AGENTS.md`. 只放分册索引, 优先级和默认取值; 通用条款在同目录 `BASE-RULES.md`.
 - 当前读取的本文件位置决定安装作用域. 不维护两套规则; 安装器把同一套分册原文覆盖到当前作用域的规则根, 不改写 Markdown 正文.
 - POSIX 用 `install.sh`, 原生 Windows 用 `install.ps1`. Windows 不自动修改用户 `PATH`; `.cmd` 入口只供人工交互的普通参数. 含特殊字符的自动化必须用进程 API 的 argv 数组直接调用显式 Python 解释器和命令根里的 Python 入口, 不得经过 PowerShell/cmd 命令字符串. 原生 Windows 的执行 Agent 与 Reviewer CLI 必须是原生 `.exe`, 不执行 `.cmd`/`.bat`. 本机的工作流模式, 执行 Agent, launcher, 各审核角色及各 Agent 的模型档位保存在配置文件, 用命令根下的 `onevoke config` 查看, `onevoke welcome --reset` 修改.
-- 全局安装且 `~/.agents/AGENTS.md` 不存在时, POSIX 安装器将其符号链接到本文件; Windows 安装器优先创建硬链接并回落到符号链接, 无法安全创建则安装失败. 已有同名入口时保持不变. 项目安装不创建或修改该全局入口.
+- 全局安装且 `~/.agents/AGENTS.md` 不存在时, POSIX 安装器将其符号链接到本文件; Windows 安装器优先创建硬链接并回落到符号链接, 无法安全创建则安装失败. 已有同名入口时保持不变. 项目安装不创建或修改该全局入口; 它在项目根没有 `AGENTS.md` 时创建指向本文件的本地入口, 已有文件则保留并要求其中明确指示 Agent 读取并遵守 `.onevoke/rules/ONEVOKE-AGENTS.md`.
 - 配置文件和审核运行目录必须仅允许当前用户访问: POSIX 使用 `0600`/`0700`; Windows 私有目录/文件在创建瞬间即使用关闭继承的受保护 DACL, 不得先按继承 ACL 发布再收紧. Windows 审核运行目录必须在敏感文件写入、Reviewer 运行、进程树收集和清理期间持续持有不共享 WRITE/DELETE 的根句柄, 同时阻止入口改名和原地 reparse 切换; 清理从固定句柄逐层拒绝 reparse point, 并设置有界预算, 清理失败时审核失败. Windows 配置路径必须从卷/UNC anchor 逐分量拒绝 reparse point; 内容读取、schema 校验和有效旧配置 DACL 迁移必须保持同一固定句柄, 无效配置不迁移 ACL; 保存时临时文件先私有再写入, 并只收紧本次新建的配置目录, 不得改动既有祖先 DACL. Windows 的目标记忆目录/文件也必须迁移为当前用户独占的受保护 DACL. 看板、Git exclude 及记忆合并在 Windows 拒绝符号链接、junction 等 reparse point; Git exclude 保持既有 ACL 并在同一固定句柄内去重追加, 记忆合并通过固定句柄读取/追加并使用 `LockFileEx`; 禁绕过 Onevoke 命令直接操作这些边界.
 
 ## 作用域
@@ -19,6 +19,7 @@
 
 - 全局安装: 规则根是用户 HOME 下的 `.agents`.
 - 项目安装: 规则根是当前 Git 项目主 worktree 下的 `.onevoke/rules`. 项目载荷只落在该主 worktree 的 `.onevoke/`; 任务 worktree 共享这一份, 不建副本, 镜像或符号链接. 项目安装零全局写入, 不读取或写入 HOME 下的 Onevoke 路径.
+- 项目规则接入点是主 worktree 根目录的 `AGENTS.md` (Claude 使用 `CLAUDE.md`). 项目安装器仅在根 `AGENTS.md` 不存在时创建本地链接并写入本仓库的 `info/exclude`; 已有入口不覆盖, 不改正文, 也不把它加入 exclude. 项目模式的 `doctor` 和 `welcome` 只核验该项目入口, 不用全局 Agent 规则代替.
 - 两种安装可同时存在. 以当前读取的入口为准; 同时存在时项目入口和项目命令根下的绝对命令优先于 PATH 中的全局同名命令.
 - 分册一律用「规则根」「命令根」「配置文件」「资源目录」这些逻辑名称引用路径, 不把全局路径写成唯一有效路径.
 - 调用命令时使用当前作用域命令根下的入口. 全局安装可使用已加入 PATH 的命令名 (Windows 须先把命令根加入 PATH). 项目安装必须使用绝对入口, 例如 POSIX 的 `<命令根>/kanban` 与 `<命令根>/onevoke`; Windows 人工交互可用 `<命令根>\kanban.cmd` 与 `<命令根>\onevoke.cmd`. 禁止改用 PATH 中的全局同名命令.

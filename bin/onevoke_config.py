@@ -54,6 +54,7 @@ configure_stdio()
 SCHEMA_VERSION = 1
 PROJECT_INSTALL_DIRNAME = ".onevoke"
 PROJECT_GIT_EXCLUDE_PATTERN = "/.onevoke/"
+PROJECT_AGENTS_GIT_EXCLUDE_PATTERN = "/AGENTS.md"
 InstallMode = Literal["global", "project"]
 EXECUTION_AGENTS = ("codex", "claude", "grok")
 REVIEW_AGENTS = ("codex", "claude", "grok")
@@ -488,6 +489,21 @@ def ensure_project_git_exclude(project: Path) -> Path:
     return _append_git_exclude_pattern(paths.project_root, PROJECT_GIT_EXCLUDE_PATTERN)
 
 
+def ensure_project_agents_git_exclude(project: Path) -> Path:
+    """幂等忽略安装器创建的项目级 ``AGENTS.md`` 本地入口."""
+    paths = project_install_paths(project)
+    if paths.project_root is None:
+        raise ConfigError(
+            language_text(
+                "项目安装路径缺少主 worktree",
+                "project install paths are missing the main worktree",
+            )
+        )
+    return _append_git_exclude_pattern(
+        paths.project_root, PROJECT_AGENTS_GIT_EXCLUDE_PATTERN
+    )
+
+
 def config_path() -> Path:
     override = os.environ.get("ONEVOKE_CONFIG")
     if override:
@@ -768,7 +784,7 @@ def save_config(config: dict[str, Any]) -> Path:
 
 
 def main(argv: list[str]) -> int:
-    """查询入口, 目前只供 onevoke-review.sh 读取 review 模型配置."""
+    """供审核门禁和安装器读取受校验的配置/项目路径."""
     apply_language_argument(argv)
     bind_effective_language()
     import argparse
@@ -795,6 +811,23 @@ def main(argv: list[str]) -> int:
             "print configured language (cn|en)",
         ),
     )
+    layout = commands.add_parser(
+        "project-layout",
+        help=language_text(
+            "输出项目安装路径 JSON",
+            "print project installation paths as JSON",
+        ),
+    )
+    layout.add_argument("project")
+    exclude = commands.add_parser(
+        "project-exclude",
+        help=language_text(
+            "写入项目本地 Git exclude",
+            "update the project's local Git exclude",
+        ),
+    )
+    exclude.add_argument("project")
+    exclude.add_argument("--agents", action="store_true")
     args = parser.parse_args(argv)
     if args.command == "review-model":
         entry = effective_config()["models"]["review"][args.agent]
@@ -805,6 +838,26 @@ def main(argv: list[str]) -> int:
         language = configured_language()
         if language:
             print(language)
+        return 0
+    if args.command == "project-layout":
+        paths = project_install_paths(Path(args.project))
+        if paths.project_root is None or paths.install_root is None:
+            raise ConfigError(language_text(
+                "项目安装路径缺少主 worktree",
+                "project install paths are missing the main worktree",
+            ))
+        print(json.dumps({
+            "project_root": str(paths.project_root),
+            "install_root": str(paths.install_root),
+            "bin_dir": str(paths.bin_dir),
+            "rules_dir": str(paths.rules_dir),
+            "share_dir": str(paths.share_dir / "kanban-web"),
+        }, ensure_ascii=False))
+        return 0
+    if args.command == "project-exclude":
+        ensure_project_git_exclude(Path(args.project))
+        if args.agents:
+            ensure_project_agents_git_exclude(Path(args.project))
         return 0
     stages = effective_config()["review_stages"]
     for role in REVIEW_ROLES:

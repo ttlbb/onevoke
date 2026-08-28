@@ -281,6 +281,7 @@ from pathlib import Path
 sys.path.insert(0, os.environ["ONEVOKE_INSTALL_BIN"])
 from onevoke_config import (
     ConfigError,
+    ensure_project_agents_git_exclude,
     ensure_project_git_exclude,
     language_text,
     project_install_paths,
@@ -326,6 +327,9 @@ try:
     if command == "exclude":
         ensure_project_git_exclude(target)
         sys.exit(0)
+    if command == "exclude-agents":
+        ensure_project_agents_git_exclude(target)
+        sys.exit(0)
     paths = project_install_paths(target)
     if paths.install_root is None or paths.project_root is None:
         raise ConfigError(
@@ -340,6 +344,11 @@ try:
     reject_existing(paths.share_dir, must_be_dir=True)
     web_share = paths.share_dir / "kanban-web"
     reject_existing(web_share, must_be_dir=True)
+    project_agents = paths.project_root / "AGENTS.md"
+    if os.path.lexists(project_agents) and not (
+        project_agents.is_file() or project_agents.is_symlink()
+    ):
+        fail(project_agents, "directory")
 except ConfigError as error:
     print(error, file=sys.stderr)
     sys.exit(1)
@@ -374,14 +383,46 @@ EOF
   reject_payload_targets "$dest_bin" "$dest_agents" "$dest_share" 1
   run_project_helper exclude "$project_arg" >/dev/null || exit 1
   install_payloads "$dest_bin" "$dest_agents" "$dest_share"
+  project_agent_rules="$_main_worktree/AGENTS.md"
+  project_rules_entry="$dest_agents/ONEVOKE-AGENTS.md"
+  project_rules_created=0
+  if [ -f "$project_rules_entry" ] && [ ! -e "$project_agent_rules" ] && [ ! -L "$project_agent_rules" ]; then
+    if ln -s ".onevoke/rules/ONEVOKE-AGENTS.md" "$project_agent_rules" 2>/dev/null; then
+      if run_project_helper exclude-agents "$project_arg" >/dev/null; then
+        project_rules_created=1
+      else
+        if [ -L "$project_agent_rules" ] && [ "$(readlink "$project_agent_rules")" = ".onevoke/rules/ONEVOKE-AGENTS.md" ]; then
+          rm "$project_agent_rules"
+        fi
+        exit 1
+      fi
+    elif [ ! -e "$project_agent_rules" ] && [ ! -L "$project_agent_rules" ]; then
+      if [ "$onevoke_zh" -eq 1 ]; then
+        printf '%s\n' "错误: 无法创建项目级 Codex 规则入口: $project_agent_rules" >&2
+      else
+        printf '%s\n' "error: could not create the project-level Codex rules entry: $project_agent_rules" >&2
+      fi
+      exit 1
+    fi
+  fi
   print_installed
   printf '%s\n' "$dest_bin/onevoke" "$dest_bin/kanban"
   if [ "$onevoke_zh" -eq 1 ]; then
+    if [ "$project_rules_created" -eq 1 ]; then
+      printf '%s\n' "Codex 项目规则已接入: $project_agent_rules" >&2
+    else
+      printf '%s\n' "保留现有项目规则入口: $project_agent_rules; 请在其中明确要求读取并遵守 .onevoke/rules/ONEVOKE-AGENTS.md" >&2
+    fi
     printf '%s\n' \
       "项目安装完成, 未修改 PATH, 也未改动全局 Onevoke 安装." \
       "请使用以上绝对路径." \
       >&2
   else
+    if [ "$project_rules_created" -eq 1 ]; then
+      printf '%s\n' "Codex project rules connected: $project_agent_rules" >&2
+    else
+      printf '%s\n' "Existing project rules entry kept: $project_agent_rules; explicitly require reading and following .onevoke/rules/ONEVOKE-AGENTS.md" >&2
+    fi
     printf '%s\n' \
       "Project install finished; PATH and the global Onevoke install were not changed." \
       "Use the absolute command paths above." \

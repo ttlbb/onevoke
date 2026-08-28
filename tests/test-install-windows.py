@@ -137,6 +137,92 @@ class WindowsInstallerTest(unittest.TestCase):
         )
         return path
 
+    def init_git_repo(self, path: Path) -> Path:
+        path.mkdir(parents=True)
+        subprocess.run(
+            ["git", "init", "-q", str(path)],
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(path), "config", "user.email", "onevoke@example.com"],
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(path), "config", "user.name", "Onevoke Test"],
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(path), "commit", "--allow-empty", "-q", "-m", "init"],
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        return path
+
+    def test_project_install_connects_codex_rules_without_global_writes(self) -> None:
+        home = self.root / "project-home"
+        project = self.init_git_repo(self.root / "project app")
+
+        result = self.run_installer(home, "--project", str(project))
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        lines = result.stdout.splitlines()
+        self.assertEqual("Onevoke 已安装", lines[0])
+        self.assertEqual(project / ".onevoke" / "bin" / "onevoke.cmd", Path(lines[1]))
+        self.assertEqual(project / ".onevoke" / "bin" / "kanban.cmd", Path(lines[2]))
+        entry = project / ".onevoke" / "rules" / "ONEVOKE-AGENTS.md"
+        project_rules = project / "AGENTS.md"
+        self.assertTrue(entry.is_file())
+        self.assertTrue(project_rules.exists())
+        self.assertTrue(os.path.samefile(project_rules, entry))
+        exclude = subprocess.run(
+            ["git", "-C", str(project), "check-ignore", "-v", ".onevoke", "AGENTS.md"],
+            text=True,
+            encoding="utf-8",
+            errors="strict",
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(0, exclude.returncode, exclude.stderr)
+        self.assertIn("/.onevoke/", exclude.stdout)
+        self.assertIn("/AGENTS.md", exclude.stdout)
+        self.assertFalse((home / ".local").exists())
+        self.assertFalse((home / ".agents").exists())
+        self.assertNotIn("welcome 未完成", result.stderr)
+
+    def test_project_install_preserves_existing_project_rules(self) -> None:
+        home = self.root / "project-existing-home"
+        project = self.init_git_repo(self.root / "project existing")
+        project_rules = project / "AGENTS.md"
+        project_rules.write_text("# existing project rules\n", encoding="utf-8")
+
+        result = self.run_installer(home, "--project", str(project))
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual(
+            "# existing project rules\n", project_rules.read_text(encoding="utf-8")
+        )
+        self.assertIn("保留现有项目规则入口", result.stderr)
+        exclude = (project / ".git" / "info" / "exclude").read_text(encoding="utf-8")
+        self.assertNotIn("/AGENTS.md", exclude.splitlines())
+
+    def test_project_install_rejects_project_rules_directory_before_writes(self) -> None:
+        home = self.root / "project-directory-home"
+        project = self.init_git_repo(self.root / "project directory")
+        (project / "AGENTS.md").mkdir()
+
+        result = self.run_installer(home, "--project", str(project))
+
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("安装目标是目录", result.stderr)
+        self.assertFalse((project / ".onevoke").exists())
+
     def test_installer_copies_payload_keeps_then_removes_legacy_entries(self) -> None:
         home = self.root / "install-home"
         installed_bin = home / ".local" / "bin"

@@ -1443,7 +1443,7 @@ class OnevokeCommandTest(unittest.TestCase):
         self.assertNotIn("Traceback", decoded)
         self.assertFalse(self.config.exists())
 
-    def test_project_rules_integration_rejects_global_onevoke_entry(self) -> None:
+    def test_project_rules_integration_uses_project_root_not_global_files(self) -> None:
         onevoke = load_onevoke_module()
         project = self.root / "app"
         rules_dir = project / ".onevoke" / "rules"
@@ -1462,10 +1462,23 @@ class OnevokeCommandTest(unittest.TestCase):
             project_root=project,
             install_root=project / ".onevoke",
         )
-        claude = self.home / ".claude" / "CLAUDE.md"
-        claude.parent.mkdir(parents=True)
+        global_codex = self.home / ".codex" / "AGENTS.md"
+        global_codex.parent.mkdir(parents=True)
+        global_codex.symlink_to(entry)
+        global_claude = self.home / ".claude" / "CLAUDE.md"
+        global_claude.parent.mkdir(parents=True)
+        global_claude.write_text(f"@{entry}\n", encoding="utf-8")
+        claude = project / "CLAUDE.md"
+        codex = project / "AGENTS.md"
         with mock.patch.object(onevoke, "install_paths", return_value=paths):
             with mock.patch.object(Path, "home", return_value=self.home):
+                ok, detail = onevoke.rules_integration("codex")
+                self.assertFalse(ok)
+                self.assertIn(str(codex), detail)
+                ok, detail = onevoke.rules_integration("claude")
+                self.assertFalse(ok)
+                self.assertIn(str(claude), detail)
+
                 claude.write_text("@~/.agents/ONEVOKE-AGENTS.md\n", encoding="utf-8")
                 ok, _ = onevoke.rules_integration("claude")
                 self.assertFalse(ok)
@@ -1488,8 +1501,6 @@ class OnevokeCommandTest(unittest.TestCase):
                 body = "# shared Onevoke entry\n"
                 entry.write_text(body, encoding="utf-8")
                 global_entry.write_text(body, encoding="utf-8")
-                codex = self.home / ".codex" / "AGENTS.md"
-                codex.parent.mkdir(parents=True)
                 if codex.exists() or codex.is_symlink():
                     codex.unlink()
                 codex.symlink_to(global_entry)
@@ -1504,6 +1515,36 @@ class OnevokeCommandTest(unittest.TestCase):
                 ok, _ = onevoke.rules_integration("codex")
                 self.assertFalse(ok)
                 codex.write_text(body + "\n## extra\n", encoding="utf-8")
+                ok, detail = onevoke.rules_integration("codex")
+                self.assertTrue(ok, detail)
+                codex.write_text(
+                    "- 开始任务前必须读取并遵守 "
+                    "`.onevoke/rules/ONEVOKE-AGENTS.md`.\n",
+                    encoding="utf-8",
+                )
+                ok, detail = onevoke.rules_integration("codex")
+                self.assertTrue(ok, detail)
+                codex.write_text(
+                    "不要读取 `.onevoke/rules/ONEVOKE-AGENTS.md`.\n",
+                    encoding="utf-8",
+                )
+                ok, _ = onevoke.rules_integration("codex")
+                self.assertFalse(ok)
+                codex.write_text(
+                    "<!-- 必须读取 .onevoke/rules/ONEVOKE-AGENTS.md -->\n"
+                    "```text\n"
+                    "必须读取 .onevoke/rules/ONEVOKE-AGENTS.md\n"
+                    "```\n",
+                    encoding="utf-8",
+                )
+                ok, _ = onevoke.rules_integration("codex")
+                self.assertFalse(ok)
+                source.write_text(
+                    "Read and follow .onevoke/rules/ONEVOKE-AGENTS.md.\n",
+                    encoding="utf-8",
+                )
+                codex.unlink()
+                codex.symlink_to(source)
                 ok, detail = onevoke.rules_integration("codex")
                 self.assertTrue(ok, detail)
 
@@ -1595,6 +1636,11 @@ class ProjectOnevokeRuntimeTest(unittest.TestCase):
             "# Onevoke 全局工作流规则\n\n项目规则入口\n",
             encoding="utf-8",
         )
+        (project / "AGENTS.md").write_text(
+            "- 开始任务前必须读取并遵守 "
+            "`.onevoke/rules/ONEVOKE-AGENTS.md`.\n",
+            encoding="utf-8",
+        )
         if commands:
             for name in ("kanban", "kb", "merge-worktree-memory.py"):
                 command = bin_dir / name
@@ -1661,6 +1707,7 @@ class ProjectOnevokeRuntimeTest(unittest.TestCase):
         self.assertIn("安装模式: 项目", result.stderr)
         self.assertIn(str(install_root), result.stderr)
         self.assertIn(str(install_root / "rules" / "ONEVOKE-AGENTS.md"), result.stderr)
+        self.assertIn(str(self.project / "AGENTS.md"), result.stderr)
         self.assertIn(str(install_root / "bin" / "kanban"), result.stderr)
         self.assertIn(str(install_root / "config.json"), result.stderr)
         self.assertNotIn(str(trap), result.stderr)
@@ -1683,6 +1730,20 @@ class ProjectOnevokeRuntimeTest(unittest.TestCase):
         self.assertIn(f"kanban 不在项目命令根: {expected}", result.stderr)
         self.assertNotIn("~/.local/bin", result.stderr)
         self.assertNotIn("不在 PATH", result.stderr)
+
+    def test_project_doctor_rejects_missing_project_rules_entry(self) -> None:
+        self.install_project_onevoke()
+        (self.project / "AGENTS.md").unlink()
+        self.write_config(self.project / ".onevoke" / "config.json")
+        for name in ("codex", "claude", "grok", "tmux"):
+            self.fake_command(name)
+
+        result = self.run_project("doctor")
+
+        self.assertEqual(1, result.returncode)
+        self.assertIn("Codex 尚未接入 Onevoke 规则", result.stderr)
+        self.assertIn(str(self.project / "AGENTS.md"), result.stderr)
+        self.assertNotIn(str(self.home / ".codex" / "AGENTS.md"), result.stderr)
 
     @unittest.skipUnless(os.name == "posix", "POSIX review dispatch uses onevoke-review.sh")
     def test_project_review_uses_local_gate_not_path(self) -> None:

@@ -2,6 +2,8 @@
 
 一个人用看板调度 AI Agent. 新安装默认使用 Onevoke Lite；原有完整工作流继续以 Classic 模式保留.
 
+从安装、配置到日常执行、审核和集成的完整说明见 [Onevoke Lite 项目全流程操作手册](docs/ONEVOKE-LITE-OPERATIONS.md).
+
 ![Onevoke 工作流](docs/workflow.svg)
 
 ## 1. 安装
@@ -59,6 +61,14 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 --project 
 - 命令根: `<主 worktree>/.onevoke/bin`
 - 配置文件: `<主 worktree>/.onevoke/config.json`
 - 资源目录: `<主 worktree>/.onevoke/share`
+
+项目根目录没有 `AGENTS.md` 时, 安装器会自动创建指向项目规则入口的链接, 并仅在该仓库本地忽略自动生成的入口. 已有 `AGENTS.md` 时不会覆盖或忽略它; 请在原文件加入一条明确指令:
+
+```md
+- 开始任务前必须读取并遵守 `.onevoke/rules/ONEVOKE-AGENTS.md`.
+```
+
+`onevoke doctor` 和 `onevoke welcome` 在项目模式下只检查项目根的 `AGENTS.md` 或 `CLAUDE.md`, 不再用 HOME 下的全局规则入口冒充项目接入. 这与 [Codex 官方的 AGENTS.md 项目规则发现方式](https://learn.chatgpt.com/docs/agent-configuration/agents-md) 一致.
 
 限制:
 

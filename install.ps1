@@ -124,18 +124,79 @@ function Get-ConfiguredLanguage {
   return $null
 }
 
+function Invoke-OnevokeConfig {
+  param([string]$SourceRoot, [string[]]$Arguments, [string]$Language)
+
+  $configScript = Join-Path $SourceRoot "bin\onevoke_config.py"
+  if (-not [IO.File]::Exists($configScript)) {
+    throw [InvalidOperationException]::new("onevoke_config.py not found: $configScript")
+  }
+  $previousNoBytecode = [Environment]::GetEnvironmentVariable("PYTHONDONTWRITEBYTECODE", "Process")
+  $previousLanguage = [Environment]::GetEnvironmentVariable("ONEVOKE_LANG", "Process")
+  $lastError = ""
+  try {
+    [Environment]::SetEnvironmentVariable("PYTHONDONTWRITEBYTECODE", "1", "Process")
+    [Environment]::SetEnvironmentVariable("ONEVOKE_LANG", $Language, "Process")
+    foreach ($launcher in @(Get-PythonLaunchers)) {
+      try {
+        $output = @(
+          & $launcher.Path @($launcher.Arguments) $configScript @Arguments 2>&1
+        )
+      } catch {
+        $lastError = [string]$_.Exception.Message
+        continue
+      }
+      if ($LASTEXITCODE -eq 0) {
+        return ($output -join "`n")
+      }
+      $lastError = ($output -join "`n")
+    }
+  } finally {
+    [Environment]::SetEnvironmentVariable("PYTHONDONTWRITEBYTECODE", $previousNoBytecode, "Process")
+    [Environment]::SetEnvironmentVariable("ONEVOKE_LANG", $previousLanguage, "Process")
+  }
+  if ([string]::IsNullOrWhiteSpace($lastError)) {
+    $lastError = "no usable native Python 3 launcher was found"
+  }
+  throw [InvalidOperationException]::new($lastError)
+}
+
+function New-OnevokeRulesLink {
+  param([string]$LinkPath, [string]$TargetPath, [bool]$Chinese)
+
+  if (Test-PathEntryExists $LinkPath) {
+    return $false
+  }
+  try {
+    New-Item -ItemType HardLink -Path $LinkPath -Target $TargetPath -ErrorAction Stop | Out-Null
+    return $true
+  } catch {
+    try {
+      New-Item -ItemType SymbolicLink -Path $LinkPath -Target $TargetPath -ErrorAction Stop | Out-Null
+      return $true
+    } catch {
+      if ($Chinese) {
+        throw [InvalidOperationException]::new("错误: 无法安全创建 $LinkPath; 文件系统需支持硬链接或符号链接")
+      }
+      throw [InvalidOperationException]::new("error: could not safely create $LinkPath; the file system must support hard links or symbolic links")
+    }
+  }
+}
+
 function Show-Usage {
   param([bool]$Chinese, [bool]$ErrorStream)
 
   if ($Chinese) {
     $lines = @(
-      "用法: install.ps1 [--lang {cn,en}]",
-      "把 Onevoke 命令装到 ~/.local/bin, 规则装到 ~/.agents."
+      "用法: install.ps1 [--lang {cn,en}] [--project <目录>]",
+      "把 Onevoke 命令装到 ~/.local/bin, 规则装到 ~/.agents.",
+      "指定 --project 时只装到 Git 项目主 worktree 的 .onevoke/, 不写全局路径, 也不运行 welcome."
     )
   } else {
     $lines = @(
-      "usage: install.ps1 [--lang {cn,en}]",
-      "Install Onevoke commands to ~/.local/bin and rules to ~/.agents."
+      "usage: install.ps1 [--lang {cn,en}] [--project <directory>]",
+      "Install Onevoke commands to ~/.local/bin and rules to ~/.agents.",
+      "With --project, install only into the Git project's main worktree .onevoke/, skip global paths, and do not run welcome."
     )
   }
   foreach ($line in $lines) {
@@ -224,24 +285,78 @@ function Test-PathEntryExists {
 $installArgs = @($args)
 $languageSet = $false
 $requestedLanguage = ""
-$remainingIndex = 0
 $missingLanguageValue = $false
+$projectSet = $false
+$requestedProject = ""
+$missingProjectValue = $false
+$duplicateProject = $false
+$showHelp = $false
+$parseError = $false
 
-if ($installArgs.Count -gt 0) {
-  if ($installArgs[0] -eq "--lang") {
+$index = 0
+while ($index -lt $installArgs.Count) {
+  $argument = [string]$installArgs[$index]
+  if ($argument -eq "--lang") {
     $languageSet = $true
-    if ($installArgs.Count -ge 2) {
-      $requestedLanguage = [string]$installArgs[1]
-      $remainingIndex = 2
-    } else {
+    if ($index + 1 -ge $installArgs.Count) {
       $missingLanguageValue = $true
-      $remainingIndex = 1
+      $parseError = $true
+      break
     }
-  } elseif ([string]$installArgs[0] -like "--lang=*") {
-    $languageSet = $true
-    $requestedLanguage = ([string]$installArgs[0]).Substring(7)
-    $remainingIndex = 1
+    $requestedLanguage = [string]$installArgs[$index + 1]
+    $index += 2
+    continue
   }
+  if ($argument -like "--lang=*") {
+    $languageSet = $true
+    $requestedLanguage = $argument.Substring(7)
+    $index += 1
+    continue
+  }
+  if ($argument -eq "--project") {
+    if ($projectSet) {
+      $duplicateProject = $true
+      $parseError = $true
+      break
+    }
+    $projectSet = $true
+    if ($index + 1 -ge $installArgs.Count) {
+      $missingProjectValue = $true
+      $parseError = $true
+      break
+    }
+    $requestedProject = [string]$installArgs[$index + 1]
+    if ($requestedProject.StartsWith("--")) {
+      $missingProjectValue = $true
+      $parseError = $true
+      break
+    }
+    $index += 2
+    continue
+  }
+  if ($argument -like "--project=*") {
+    if ($projectSet) {
+      $duplicateProject = $true
+      $parseError = $true
+      break
+    }
+    $projectSet = $true
+    $requestedProject = $argument.Substring(10)
+    if ([string]::IsNullOrEmpty($requestedProject)) {
+      $missingProjectValue = $true
+      $parseError = $true
+      break
+    }
+    $index += 1
+    continue
+  }
+  if ($argument -in @("-h", "--help")) {
+    $showHelp = $true
+    $index += 1
+    continue
+  }
+  $parseError = $true
+  break
 }
 
 $projectDir = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -249,7 +364,7 @@ $locale = ""
 if ($requestedLanguage -in @("cn", "en")) {
   $locale = $requestedLanguage
 }
-if (-not $languageSet -or [string]::IsNullOrEmpty($locale)) {
+if ((-not $languageSet -or [string]::IsNullOrEmpty($locale)) -and -not $projectSet) {
   $locale = Get-ConfiguredLanguage $projectDir
 }
 if ([string]::IsNullOrEmpty($locale)) {
@@ -276,21 +391,145 @@ if ($languageSet -and $requestedLanguage -notin @("cn", "en")) {
   }
   exit 2
 }
-
-$remainingArgs = @()
-if ($remainingIndex -lt $installArgs.Count) {
-  $remainingArgs = @($installArgs[$remainingIndex..($installArgs.Count - 1)])
+if ($missingProjectValue) {
+  Show-Usage $chinese $true
+  if ($chinese) {
+    Write-Stderr "错误: --project 需要目录"
+  } else {
+    Write-Stderr "error: --project requires a directory"
+  }
+  exit 2
 }
-if ($remainingArgs.Count -eq 1 -and $remainingArgs[0] -in @("-h", "--help")) {
+if ($duplicateProject) {
+  Show-Usage $chinese $true
+  if ($chinese) {
+    Write-Stderr "错误: --project 只能指定一次"
+  } else {
+    Write-Stderr "error: --project may be given only once"
+  }
+  exit 2
+}
+if ($showHelp -and -not $parseError) {
   Show-Usage $chinese $false
   exit 0
 }
-if ($remainingArgs.Count -gt 0) {
+if ($parseError) {
   Show-Usage $chinese $true
   exit 2
 }
 
 try {
+  $shareSource = Join-Path $projectDir "share\kanban-web"
+  $binSource = Join-Path $projectDir "bin"
+  $rulesSource = Join-Path $projectDir "rules"
+  $binFiles = @(Get-SourceFiles $binSource "")
+  $ruleFiles = @(Get-SourceFiles $rulesSource ".md")
+  $shareFiles = @()
+  if ([IO.Directory]::Exists($shareSource)) {
+    $shareFiles = @(Get-SourceFiles $shareSource "")
+  }
+
+  if ($projectSet) {
+    $helperLanguage = if ($chinese) { "cn" } else { "en" }
+    $layoutJson = Invoke-OnevokeConfig -SourceRoot $projectDir -Arguments @("project-layout", $requestedProject) -Language $helperLanguage
+    try {
+      $layout = $layoutJson | ConvertFrom-Json -ErrorAction Stop
+    } catch {
+      if ($chinese) {
+        Fail-Install "错误: 无法解析项目安装路径"
+      } else {
+        Fail-Install "error: failed to resolve project installation paths"
+      }
+    }
+    $projectRoot = [IO.Path]::GetFullPath([string]$layout.project_root)
+    $installRoot = [IO.Path]::GetFullPath([string]$layout.install_root)
+    $binDir = [IO.Path]::GetFullPath([string]$layout.bin_dir)
+    $agentsDir = [IO.Path]::GetFullPath([string]$layout.rules_dir)
+    $shareDir = [IO.Path]::GetFullPath([string]$layout.share_dir)
+
+    $directoryTargets = @(
+      $projectRoot,
+      $installRoot,
+      $binDir,
+      $agentsDir,
+      (Split-Path -Parent $shareDir),
+      $shareDir
+    )
+    foreach ($directory in $directoryTargets | Select-Object -Unique) {
+      Assert-DirectoryTarget $directory $chinese
+    }
+    $projectAgentRules = Join-Path $projectRoot "AGENTS.md"
+    Assert-FileTarget $projectAgentRules $chinese $false
+    foreach ($source in $binFiles) {
+      Assert-FileTarget (Join-Path $binDir $source.Name) $chinese $false
+    }
+    foreach ($source in $ruleFiles) {
+      Assert-FileTarget (Join-Path $agentsDir $source.Name) $chinese $false
+    }
+    foreach ($source in $shareFiles) {
+      Assert-FileTarget (Join-Path $shareDir $source.Name) $chinese $false
+    }
+
+    Invoke-OnevokeConfig -SourceRoot $projectDir -Arguments @("project-exclude", $projectRoot) -Language $helperLanguage | Out-Null
+    New-Item -ItemType Directory -Path $binDir -Force | Out-Null
+    New-Item -ItemType Directory -Path $agentsDir -Force | Out-Null
+    foreach ($source in $binFiles) {
+      Copy-Item -LiteralPath $source.FullName -Destination (Join-Path $binDir $source.Name) -Force
+    }
+    foreach ($source in $ruleFiles) {
+      Copy-Item -LiteralPath $source.FullName -Destination (Join-Path $agentsDir $source.Name) -Force
+    }
+    if ([IO.Directory]::Exists($shareSource)) {
+      New-Item -ItemType Directory -Path $shareDir -Force | Out-Null
+      foreach ($source in $shareFiles) {
+        Copy-Item -LiteralPath $source.FullName -Destination (Join-Path $shareDir $source.Name) -Force
+      }
+    }
+
+    $entryRules = Join-Path $agentsDir "ONEVOKE-AGENTS.md"
+    $internalAgentRules = Join-Path $agentsDir "AGENTS.md"
+    if ([IO.File]::Exists($entryRules)) {
+      New-OnevokeRulesLink $internalAgentRules $entryRules $chinese | Out-Null
+    }
+    $projectRulesCreated = $false
+    if ([IO.File]::Exists($entryRules) -and -not (Test-PathEntryExists $projectAgentRules)) {
+      $projectRulesCreated = New-OnevokeRulesLink $projectAgentRules $entryRules $chinese
+      if ($projectRulesCreated) {
+        try {
+          Invoke-OnevokeConfig -SourceRoot $projectDir -Arguments @("project-exclude", "--agents", $projectRoot) -Language $helperLanguage | Out-Null
+        } catch {
+          if (Test-PathEntryExists $projectAgentRules) {
+            [IO.File]::Delete($projectAgentRules)
+          }
+          throw
+        }
+      }
+    }
+
+    if ($chinese) {
+      [Console]::Out.WriteLine("Onevoke 已安装")
+      if ($projectRulesCreated) {
+        Write-Stderr "Codex 项目规则已接入: $projectAgentRules"
+      } else {
+        Write-Stderr "保留现有项目规则入口: $projectAgentRules; 请在其中明确要求读取并遵守 .onevoke/rules/ONEVOKE-AGENTS.md"
+      }
+      Write-Stderr "项目安装完成, 未修改 PATH, 也未改动全局 Onevoke 安装."
+      Write-Stderr "请使用以下绝对路径."
+    } else {
+      [Console]::Out.WriteLine("Onevoke installed")
+      if ($projectRulesCreated) {
+        Write-Stderr "Codex project rules connected: $projectAgentRules"
+      } else {
+        Write-Stderr "Existing project rules entry kept: $projectAgentRules; explicitly require reading and following .onevoke/rules/ONEVOKE-AGENTS.md"
+      }
+      Write-Stderr "Project install finished; PATH and the global Onevoke install were not changed."
+      Write-Stderr "Use the absolute paths below."
+    }
+    [Console]::Out.WriteLine((Join-Path $binDir "onevoke.cmd"))
+    [Console]::Out.WriteLine((Join-Path $binDir "kanban.cmd"))
+    exit 0
+  }
+
   # Native Windows Python resolves Path.home() from USERPROFILE. Keep the
   # installer on the same boundary; HOME is commonly inherited from Git Bash
   # and may point somewhere else.
@@ -309,17 +548,7 @@ try {
 
   $binDir = Join-Path $userHome ".local\bin"
   $agentsDir = Join-Path $userHome ".agents"
-  $shareSource = Join-Path $projectDir "share\kanban-web"
   $shareDir = Join-Path $userHome ".local\share\onevoke\kanban-web"
-  $binSource = Join-Path $projectDir "bin"
-  $rulesSource = Join-Path $projectDir "rules"
-
-  $binFiles = @(Get-SourceFiles $binSource "")
-  $ruleFiles = @(Get-SourceFiles $rulesSource ".md")
-  $shareFiles = @()
-  if ([IO.Directory]::Exists($shareSource)) {
-    $shareFiles = @(Get-SourceFiles $shareSource "")
-  }
 
   # Preflight every managed directory and file before creating or copying anything.
   $directoryTargets = @(

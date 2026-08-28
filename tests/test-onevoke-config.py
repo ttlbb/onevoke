@@ -218,12 +218,14 @@ class InstallContextTest(unittest.TestCase):
         returned = None
         for _ in range(2):
             returned = self.config.ensure_project_git_exclude(project)
+            self.config.ensure_project_agents_git_exclude(project)
 
         self.assertIsNotNone(returned)
         assert returned is not None
         self.assert_same_real_path(exclude, returned)
         lines = exclude.read_text(encoding="utf-8").splitlines()
         self.assertEqual(1, lines.count("/.onevoke/"))
+        self.assertEqual(1, lines.count("/AGENTS.md"))
         self.assertEqual("# local", lines[0])
         if os.name != "nt":
             self.assertEqual(0o644, exclude.stat().st_mode & 0o777)
