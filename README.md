@@ -80,7 +80,7 @@ kb list
 
 - `kb add` 创建一张已填好基本契约的轻量卡并放入 Inbox；中文标题会自动生成可用 slug，重名时自动追加序号.
 - `kb do <标题>` 合并 add + pick + start；`kb do <task-id>` 也可直接领取现有 Inbox/Todo 卡.
-- `kb list` 把底层兼容状态显示为 `Inbox / Todo / Doing / Done`，默认隐藏 Archived 与 Trash；底层六状态和 `kanban` 命令保持不变.
+- `kb list`, `kb web`, `kb tui` 都把底层兼容状态显示为 `Inbox / Todo / Doing / Done`, 不暴露 Archived 与 Trash; 底层六状态和 Classic `kanban` 命令保持不变.
 
 用 `--size S|M|L` 指定规模，默认是 S：
 
@@ -90,6 +90,8 @@ kb list
 | M | 单文件轻量卡 | 一次 QA | 可选 worktree |
 | L | 目录卡，强制 `spec.md` | 一次 QA | 强制 worktree |
 
+`kb start` 与 `kb do` 默认使用 `--worktree auto`: S/M 在干净、非 `main/master` 的安全工作树执行, 否则自动创建 `<主 worktree>/worktrees/<task-id>/`; L 总是创建或复用该任务 worktree. 可用 `--worktree current|required` 明确选择, L 拒绝 `current`. 有 `origin` 时自动创建前先同步并基于 `origin/develop`; 仅本地仓库基于 `develop`.
+
 Lite 默认只启用 Executor + QA Reviewer，PM/CSA/Hacker 为 `skip`；活跃的 Executor/Reviewer 只从 Codex 与 Claude 中选择. Grok 配置保留给 Classic. 用户或项目规则明确要求审核时，可用 `onevoke review --force ...` 覆盖规模策略.
 
 查看或切换模式：
@@ -98,6 +100,8 @@ Lite 默认只启用 Executor + QA Reviewer，PM/CSA/Hacker 为 `skip`；活跃�
 onevoke mode
 onevoke mode classic
 onevoke mode lite
+kb web
+kb tui
 ```
 
 旧配置没有 `workflow_mode` 时自动按 Classic 解释，不会静默改变原有多角色审核行为.

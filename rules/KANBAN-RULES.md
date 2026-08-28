@@ -41,20 +41,23 @@ Lite 入口 `kb` 调用同一个实现和安全边界，不维护第二套状态
 
 ```text
 kb add [--size S|M|L] [--type TYPE] [--slug SLUG] <title...>
-kb do [--size S|M|L] [--type TYPE] [--slug SLUG] [--agent codex|claude] [--launcher LAUNCHER] <task-id|title...>
+kb do [--size S|M|L] [--type TYPE] [--slug SLUG] [--agent codex|claude] [--launcher LAUNCHER] [--worktree auto|current|required] <task-id|title...>
 kb list [inbox|todo|doing|done]
+kb web
+kb tui
 ```
 
 - `kb add` 默认创建 S 轻量卡，自动填入可进入 Todo 的最低契约；不传 slug 时从标题生成，无法转成 ASCII 时使用 `task`，同日重名自动加序号.
 - `kb do <标题>` 顺序合并 add -> backlog 到 todo -> start；传现有 task-id 时接受 Inbox/backlog 或 Todo/todo 卡. 启动失败沿用 `start` 的原子回滚，卡片保留在 Todo 供排查或重试.
 - `kb list` 只展示四个活跃状态并映射 `backlog=Inbox`, `todo=Todo`, `working=Doing`, `done=Done`; Archived/Trash 默认隐藏. `kanban` 仍可查看和操作全部六个底层状态.
+- `kb web` 和 `kb tui` 使用同一四状态集合与映射, API payload 不返回 Archived/Trash, Web 不显示存档切换按钮, TUI 的 `a` 不启用存档栏目. Classic `kanban web/tui` 保留六状态能力.
 - Lite 的 Executor 入口只接受 Codex 或 Claude；Classic 的 `kanban` 继续兼容 Grok.
 
-- `start` 的 Agent, launcher 和模型档位默认取 Onevoke 配置, welcome 未完成时回落到默认值; `--agent` 与 `--launcher` 只覆盖本次. `start` 默认使用 Agent 的免确认模式. 原生 Windows 上 Agent CLI 必须解析为原生 `.exe`; `.cmd`/`.bat` 无法提供无损 argv 边界, `welcome`, `doctor` 与 `start` 均不得把它们视为可用 Agent.
+- `start` 的 Agent, launcher 和模型档位默认取 Onevoke 配置, welcome 未完成时回落到默认值; `--agent`, `--launcher`, `--worktree` 只覆盖本次. Lite `--worktree auto` 按规模与当前 Git 状态选择执行目录, `current` 强制校验当前工作树, `required` 强制创建或复用任务 worktree. `start` 默认使用 Agent 的免确认模式. 原生 Windows 上 Agent CLI 必须解析为原生 `.exe`; `.cmd`/`.bat` 无法提供无损 argv 边界, `welcome`, `doctor` 与 `start` 均不得把它们视为可用 Agent.
 - `init` 幂等创建看板及 6 个状态目录, Git 项目只更新本地 `info/exclude`. Windows 新目录必须相对固定父句柄以 `CREATE_NEW` 创建并在创建时应用当前用户独占的 protected DACL, 创建竞态失败关闭; 既有目录只迁移叶目录 ACL. Git exclude 的父链逐分量拒绝 reparse point, 既有 ACL 不变, 去重读取和追加在同一固定叶句柄及文件锁内完成.
 - 四种 launcher: `tmux` 在启动者当前 session 里建任务 window, 要求 `start` 本身跑在 tmux 内; `tmux-session` 按项目主树路径确定一个专属 session (`kb-<目录名>-<路径摘要>`), 不存在就新建, 已存在就复用, 同一项目的全部任务卡共用该 session, 每张卡一个 window, 不要求 `start` 跑在 tmux 内, 启动后不切换客户端, 只输出 session 名, window id 和 attach 提示; `foreground` 在当前终端前台运行并等待 Agent 退出; `console` 仅支持原生 Windows, 在独立控制台窗口启动 Agent 后立即返回 PID. `console` 没有 session/window 复用、attach 或输出抓取能力, 不是 tmux 或 `tmux-session` 的等价实现. POSIX 默认 `tmux`, Windows 默认 `console`.
 - `check` 列出全部无效入口并以非零退出. `web` 和 `tui` 启动只读看板 UI, 不提供创建, 迁移或启动 Agent.
-- `web` 是原生 Windows 第一阶段保证的看板 UI. `tui` 默认按终端宽度显示尽可能多的栏目, 每栏默认最小 40 列 (可用 `-`/`=` 调节并记住), 宽度不足时少显示, 不足一栏最小宽度时按实际宽度显示单栏, 左右切换时始终保持选中栏可见. `--single` 即使终端足够宽也只显示一栏. `--theme` 指定初始配色主题 (默认 auto 跟随终端). 方向键或 `hjkl` 切换栏目和任务, 鼠标单击栏目或任务卡聚焦/选中, 双击打开详情, 在任务卡上拖选文本自动复制到系统剪贴板, 滚轮在看板翻卡、在详情滚动正文, PgUp/PgDn 按页翻动任务列表, `/` 搜索 (也可点工具栏搜索区), `y` 复制当前任务 ID, Enter 查看任务卡, `a` 切换存档栏目, `t` 循环切换 auto/light/dark 主题, `r` 刷新, `q` 退出; 搜索覆盖标题, 任务 ID, 任务组, 类型, 负责人和状态. 任务卡详情内可用 `hjkl`/方向键移动光标, 滚轮滚动正文, Ctrl-d/u 半页, Ctrl-f/b 或 PgUp/PgDn 整页, `gg`/`G` 到顶/底, `/` 搜索正文并用 `n`/`N` 跳转匹配, `v`/`V` 进入字符/行选择模式并用 `y` 复制, 拖选正文同样自动复制. 默认每 30 秒自动刷新, 按任务 ID 原位更新并尽量保留当前栏目的选中项和滚动位置. Windows TUI 仍要求当前 Python 提供可用 curses 后端, 不属于本阶段保证; 无法加载时使用 `kanban web`.
+- `web` 是原生 Windows 第一阶段保证的看板 UI. `tui` 默认按终端宽度显示尽可能多的栏目, 每栏默认最小 40 列 (可用 `-`/`=` 调节并记住), 宽度不足时少显示, 不足一栏最小宽度时按实际宽度显示单栏, 左右切换时始终保持选中栏可见. `--single` 即使终端足够宽也只显示一栏. `--theme` 指定初始配色主题 (默认 auto 跟随终端). 方向键或 `hjkl` 切换栏目和任务, 鼠标单击栏目或任务卡聚焦/选中, 双击打开详情, 在任务卡上拖选文本自动复制到系统剪贴板, 滚轮在看板翻卡、在详情滚动正文, PgUp/PgDn 按页翻动任务列表, `/` 搜索 (也可点工具栏搜索区), `y` 复制当前任务 ID, Enter 查看任务卡, Classic 可用 `a` 切换存档栏目, `t` 循环切换 auto/light/dark 主题, `r` 刷新, `q` 退出; 搜索覆盖标题, 任务 ID, 任务组, 类型, 负责人和状态. 任务卡详情内可用 `hjkl`/方向键移动光标, 滚轮滚动正文, Ctrl-d/u 半页, Ctrl-f/b 或 PgUp/PgDn 整页, `gg`/`G` 到顶/底, `/` 搜索正文并用 `n`/`N` 跳转匹配, `v`/`V` 进入字符/行选择模式并用 `y` 复制, 拖选正文同样自动复制. 默认每 30 秒自动刷新, 按任务 ID 原位更新并尽量保留当前栏目的选中项和滚动位置. Windows TUI 仍要求当前 Python 提供可用 curses 后端, 不属于本阶段保证; 无法加载时使用 `kanban web`.
 - 命令只做结构和机械校验; 授权, 依赖和终止理由由 Agent 按本文件判断.
 
 ## 状态模型
@@ -68,7 +71,7 @@ kb list [inbox|todo|doing|done]
 - `archived/`: 不占活跃看板的完成, 取消, 重复或不修复记录.
 - `trash/`: 用户明确要求删除, 但尚未永久清理的入口; 不是任务状态.
 
-Lite 的四列只是上述目录的显示与命令兼容层，不创建 `inbox/` 或 `doing/` 目录，也不迁移已有卡片.
+Lite 的四列是 CLI, Web API/UI 与 TUI 共用的显示和命令兼容层, 不创建 `inbox/` 或 `doing/` 目录, 也不迁移已有卡片. Classic 继续使用全部六个底层状态.
 
 ```text
 backlog -> todo -> working -> done -> archived
@@ -159,6 +162,7 @@ backlog -> todo -> working -> done -> archived
 - Lite 规模 S: 局部且低风险，可在一轮实现和验证中完成；使用单文件轻量卡，不强制独立 spec，默认跳过 Review，默认在当前分支执行.
 - Lite 规模 M: 涉及一个完整功能、接口或算法调整；使用单文件轻量卡，不强制独立 spec，完成后只跑一次 QA，worktree 可选.
 - Lite 规模 L: 跨模块、重构、迁移或需要独立契约；必须使用目录卡和 `spec.md`，完成后只跑一次 QA，并强制独立 worktree.
+- Lite 启动时执行机械门禁: `auto` 对 S/M 优先使用干净且不在 `main/master` 的当前工作树, 不安全时自动隔离; L 或 `required` 创建/复用 `<主 worktree>/worktrees/<task-id>/` 与同名分支; `current` 在当前工作树不干净、detached 或位于稳定分支时拒绝. 创建失败或 Agent 未启动时, 卡片、元数据以及本次新建的 worktree/分支一起回滚.
 - 卡片元数据中的 `规模`, `工作树策略`, `审核策略` 是 Agent 执行依据. 没有 `规模` 的旧目录卡按 L、旧单文件卡按 M 处理，避免误跳 QA.
 
 - 选卡片形态前先判断总体目标能否拆成可独立领取, 验收或终止, 且资源不冲突的并行子任务. 能拆就必须建任务组, 不得仅因范围大而保留为单张大任务卡.

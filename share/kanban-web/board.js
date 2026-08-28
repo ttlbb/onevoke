@@ -2,8 +2,14 @@
   "use strict";
 
   const config = window.KANBAN_WEB || {};
-  const ACTIVE_STATES = ["backlog", "todo", "working", "done"];
-  const ALL_STATES = ACTIVE_STATES.concat(["archived", "trash"]);
+  const ACTIVE_STATES = Array.isArray(config.activeStates)
+    ? config.activeStates
+    : ["backlog", "todo", "working", "done"];
+  const ARCHIVED_STATES = Array.isArray(config.archivedStates)
+    ? config.archivedStates
+    : ["archived", "trash"];
+  const ALL_STATES = ACTIVE_STATES.concat(ARCHIVED_STATES);
+  const ARCHIVED_STATE_SET = new Set(ARCHIVED_STATES);
 
   const boardEl = document.getElementById("board");
   const errorEl = document.getElementById("board-error");
@@ -42,7 +48,7 @@
   function filteredTasks() {
     const keyword = (keywordEl.value || "").trim().toLowerCase();
     return tasks.filter((task) => {
-      if (!showArchived && (task.state === "archived" || task.state === "trash")) {
+      if (!showArchived && ARCHIVED_STATE_SET.has(task.state)) {
         return false;
       }
       if (!keyword) {
@@ -211,7 +217,7 @@
     }
     for (const state of ALL_STATES) {
       const column = columns.get(state);
-      const stateVisible = showArchived || !["archived", "trash"].includes(state);
+      const stateVisible = showArchived || !ARCHIVED_STATE_SET.has(state);
       column.section.hidden = !stateVisible;
       column.count.textContent = cardCount(counts[state]);
       column.empty.hidden = counts[state] !== 0;
@@ -284,6 +290,10 @@
   }
 
   function syncArchiveToggle() {
+    toggleArchivedEl.hidden = ARCHIVED_STATES.length === 0;
+    if (ARCHIVED_STATES.length === 0) {
+      showArchived = false;
+    }
     toggleArchivedEl.setAttribute("aria-pressed", showArchived ? "true" : "false");
     toggleArchivedEl.textContent = showArchived
       ? config.showActiveLabel
@@ -336,6 +346,9 @@
   });
 
   toggleArchivedEl.addEventListener("click", () => {
+    if (ARCHIVED_STATES.length === 0) {
+      return;
+    }
     showArchived = !showArchived;
     syncArchiveToggle();
     applyFilters();

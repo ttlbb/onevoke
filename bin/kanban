@@ -70,6 +70,7 @@ LITE_STATE_LABELS = {
     "done": "Done",
 }
 TASK_SIZES = ("S", "M", "L")
+WORKTREE_MODES = ("auto", "current", "required")
 TRANSITIONS = {
     "backlog": {"todo", "archived", "trash"},
     "todo": {"working", "archived", "trash"},
@@ -123,6 +124,15 @@ class Board:
 class Problem:
     path: Path
     message: str
+
+
+@dataclass(frozen=True)
+class WorktreePlan:
+    cwd: Path
+    branch: str = ""
+    project: Optional[Path] = None
+    created_worktree: bool = False
+    created_branch: bool = False
 
 
 def git_main_worktree(directory: Path) -> Optional[Path]:
@@ -226,7 +236,12 @@ def command_rules() -> None:
 
 
 def start_agent_prompt(
-    task_id: str, paths: InstallPaths, size: str = "M", lite: bool = False
+    task_id: str,
+    paths: InstallPaths,
+    size: str = "M",
+    lite: bool = False,
+    execution_dir: Optional[Path] = None,
+    branch: str = "",
 ) -> str:
     """生成 start 交给执行 Agent 的固定说明.
 
@@ -258,9 +273,14 @@ def start_agent_prompt(
     if not lite:
         return base
     worktree_policy, review_policy = size_policy(size)
+    execution = (
+        f", 执行目录={execution_dir}, 任务分支={branch or 'N/A'}"
+        if execution_dir is not None
+        else ""
+    )
     return (
         f"{base} Lite 规模={size}, 工作树策略={worktree_policy}, "
-        f"审核策略={review_policy}; 用户或项目规则的明确覆盖仍优先."
+        f"审核策略={review_policy}{execution}; 用户或项目规则的明确覆盖仍优先."
     )
 
 
@@ -807,6 +827,249 @@ def size_policy(size: str) -> tuple[str, str]:
     }[size]
 
 
+def git_capture(directory: Path, *arguments: str) -> Optional[subprocess.CompletedProcess]:
+    try:
+        return subprocess.run(
+            ["git", "-C", str(directory), *arguments],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+    except OSError:
+        return None
+
+
+def git_value(directory: Path, *arguments: str) -> Optional[str]:
+    result = git_capture(directory, *arguments)
+    if result is None or result.returncode != 0:
+        return None
+    value = result.stdout.strip()
+    return value or None
+
+
+def git_repository(directory: Path) -> Optional[tuple[Path, Path]]:
+    top_value = git_value(directory, "rev-parse", "--show-toplevel")
+    common_value = git_value(directory, "rev-parse", "--git-common-dir")
+    if not top_value or not common_value:
+        return None
+    top = absolute_user_path(Path(top_value))
+    common = Path(common_value)
+    if not common.is_absolute():
+        common = top / common
+    return top, absolute_user_path(common)
+
+
+def git_worktree_clean(worktree: Path) -> bool:
+    result = git_capture(worktree, "status", "--porcelain", "--untracked-files=normal")
+    return result is not None and result.returncode == 0 and not result.stdout.strip()
+
+
+def git_branch(worktree: Path) -> str:
+    return git_value(worktree, "branch", "--show-current") or ""
+
+
+def registered_worktree(project: Path, branch: str) -> Optional[Path]:
+    result = git_capture(project, "worktree", "list", "--porcelain")
+    if result is None or result.returncode != 0:
+        return None
+    for block in result.stdout.strip().split("\n\n"):
+        values = {}
+        for line in block.splitlines():
+            key, _, value = line.partition(" ")
+            values[key] = value
+        if values.get("branch") == f"refs/heads/{branch}" and values.get("worktree"):
+            return absolute_user_path(Path(values["worktree"]))
+    return None
+
+
+def local_branch_exists(project: Path, branch: str) -> bool:
+    result = git_capture(
+        project, "show-ref", "--verify", "--quiet", f"refs/heads/{branch}"
+    )
+    return result is not None and result.returncode == 0
+
+
+def git_ref_exists(project: Path, ref: str) -> bool:
+    result = git_capture(project, "show-ref", "--verify", "--quiet", ref)
+    return result is not None and result.returncode == 0
+
+
+def origin_configured(project: Path) -> bool:
+    result = git_capture(project, "remote", "get-url", "origin")
+    return result is not None and result.returncode == 0
+
+
+def fetch_origin(project: Path) -> None:
+    result = git_capture(project, "fetch", "origin")
+    if result is None or result.returncode != 0:
+        detail = (
+            (result.stderr.strip() or result.stdout.strip() or f"exit {result.returncode}")
+            if result is not None
+            else t("无法执行 git", "could not execute git")
+        )
+        raise KanbanError(t(
+            f"同步 origin 失败, 拒绝创建或启动任务: {detail}",
+            f"Failed to sync origin; refusing to create or start the task: {detail}",
+        ))
+
+
+def task_worktree_base(project: Path) -> str:
+    if origin_configured(project):
+        fetch_origin(project)
+        if not git_ref_exists(project, "refs/remotes/origin/develop"):
+            raise KanbanError(t(
+                "origin/develop 不存在, 不能自动创建任务 worktree",
+                "origin/develop does not exist; cannot create a task worktree automatically",
+            ))
+        return "origin/develop"
+    if not local_branch_exists(project, "develop"):
+        raise KanbanError(t(
+            "本地 develop 不存在, 不能自动创建任务 worktree",
+            "Local develop does not exist; cannot create a task worktree automatically",
+        ))
+    return "develop"
+
+
+def current_project_worktree(project: Path, common: Path) -> Path:
+    current = git_repository(Path.cwd())
+    if current is not None and current[1] == common:
+        return current[0]
+    return project
+
+
+def current_worktree_error(worktree: Path) -> Optional[str]:
+    branch = git_branch(worktree)
+    if not branch:
+        return t("当前工作树处于 detached HEAD", "the current worktree has a detached HEAD")
+    if branch in {"main", "master"}:
+        return t(
+            f"当前分支 {branch} 是稳定分支",
+            f"the current branch {branch} is a stable branch",
+        )
+    if not git_worktree_clean(worktree):
+        return t("当前工作树不干净", "the current worktree is not clean")
+    return None
+
+
+def create_or_reuse_task_worktree(project: Path, entry: Entry) -> WorktreePlan:
+    branch = entry.task_id
+    existing = registered_worktree(project, branch)
+    if existing is not None:
+        if not git_worktree_clean(existing):
+            raise KanbanError(t(
+                f"任务 worktree 不干净, 拒绝复用: {existing}",
+                f"Task worktree is not clean and cannot be reused: {existing}",
+            ))
+        return WorktreePlan(existing, branch, project)
+
+    worktrees = project / "worktrees"
+    target = worktrees / branch
+    ensure_windows_lexical_path_safe(target)
+    if os.path.lexists(target):
+        raise KanbanError(t(
+            f"未登记的 worktree 路径已存在: {target}",
+            f"An unregistered worktree path already exists: {target}",
+        ))
+    if os.path.lexists(worktrees) and (
+        not worktrees.is_dir() or is_reparse_point(worktrees)
+    ):
+        raise KanbanError(t(
+            f"worktrees 路径必须是普通目录: {worktrees}",
+            f"The worktrees path must be a regular directory: {worktrees}",
+        ))
+    worktrees.mkdir(parents=True, exist_ok=True)
+    add_git_exclude(worktrees)
+    branch_exists = local_branch_exists(project, branch)
+    base = task_worktree_base(project)
+    arguments = ["worktree", "add"]
+    if not branch_exists:
+        arguments.extend(["-b", branch])
+    arguments.extend([str(target), branch if branch_exists else base])
+    result = git_capture(project, *arguments)
+    if result is None or result.returncode != 0:
+        detail = (
+            (result.stderr.strip() or result.stdout.strip() or f"exit {result.returncode}")
+            if result is not None
+            else t("无法执行 git", "could not execute git")
+        )
+        raise KanbanError(t(
+            f"创建任务 worktree 失败: {detail}",
+            f"Failed to create the task worktree: {detail}",
+        ))
+    return WorktreePlan(target, branch, project, True, not branch_exists)
+
+
+def resolve_worktree_plan(
+    root: Path, entry: Entry, size: str, requested: str, lite: bool
+) -> WorktreePlan:
+    project_path = absolute_user_path(root.parent)
+    if not lite:
+        return WorktreePlan(project_path)
+    if requested not in WORKTREE_MODES:
+        raise KanbanError(t(
+            f"未知 worktree 策略: {requested}",
+            f"Unknown worktree policy: {requested}",
+        ))
+    if size == "L" and requested == "current":
+        raise KanbanError(t(
+            "Lite L 任务强制使用独立 worktree, 不能选择 current",
+            "Lite L tasks require a separate worktree and cannot use current",
+        ))
+
+    repository = git_repository(project_path)
+    if repository is None:
+        if size == "L" or requested == "required":
+            raise KanbanError(t(
+                "独立 worktree 策略需要 Git 仓库",
+                "The separate-worktree policy requires a Git repository",
+            ))
+        return WorktreePlan(project_path)
+    project, common = repository
+    current = current_project_worktree(project, common)
+    error = current_worktree_error(current)
+    require_separate = size == "L" or requested == "required"
+    if not require_separate and error is None:
+        if git_branch(current) == "develop" and origin_configured(project):
+            fetch_origin(project)
+            remote = git_value(project, "rev-parse", "refs/remotes/origin/develop")
+            local = git_value(current, "rev-parse", "HEAD")
+            if remote is None or local != remote:
+                raise KanbanError(t(
+                    "当前 develop 未与 origin/develop 同步, 拒绝直接启动任务",
+                    "The current develop branch is not synchronized with origin/develop; refusing to start the task directly",
+                ))
+        return WorktreePlan(current, git_branch(current), project)
+    if requested == "current":
+        raise KanbanError(t(
+            f"不能使用当前工作树: {error}",
+            f"Cannot use the current worktree: {error}",
+        ))
+    return create_or_reuse_task_worktree(project, entry)
+
+
+def cleanup_worktree_plan(plan: WorktreePlan) -> list[str]:
+    if not plan.created_worktree or plan.project is None:
+        return []
+    errors = []
+    remove = git_capture(plan.project, "worktree", "remove", str(plan.cwd))
+    if remove is None or remove.returncode != 0:
+        errors.append(
+            remove.stderr.strip()
+            if remove is not None and remove.stderr.strip()
+            else t("无法删除新建 worktree", "could not remove the newly created worktree")
+        )
+        return errors
+    if plan.created_branch:
+        delete = git_capture(plan.project, "branch", "-d", plan.branch)
+        if delete is None or delete.returncode != 0:
+            errors.append(
+                delete.stderr.strip()
+                if delete is not None and delete.stderr.strip()
+                else t("无法删除新建任务分支", "could not remove the newly created task branch")
+            )
+    return errors
+
+
 def render_contract(title: str, task_type: str, size: str) -> str:
     created = datetime.now().strftime("%Y-%m-%d %H:%M")
     worktree_policy, review_policy = size_policy(size)
@@ -1229,12 +1492,13 @@ def command_do(args: argparse.Namespace, root: Path) -> None:
         task=entry.task_id,
         agent=args.agent,
         launcher=args.launcher,
+        worktree=args.worktree,
         lite=True,
     )
     command_start(start_args, root)
 
 
-def start_metadata(text: str, agent: str) -> str:
+def start_metadata(text: str, agent: str, branch: str = "") -> str:
     for name, value in (
         ("负责人", agent),
         ("开始时间", datetime.now().strftime("%Y-%m-%d %H:%M")),
@@ -1243,6 +1507,14 @@ def start_metadata(text: str, agent: str) -> str:
         if len(re.findall(pattern, text)) != 1:
             raise KanbanError(t(f"任务文档缺少唯一元数据字段: {name}", f"Task document must contain exactly one metadata field: {name}"))
         text = re.sub(pattern, f"- {name}: {value}", text, count=1)
+    if branch:
+        pattern = r"(?m)^- 任务分支:\s*$"
+        if len(re.findall(pattern, text)) != 1:
+            raise KanbanError(t(
+                "任务文档缺少唯一空白元数据字段: 任务分支",
+                "Task document must contain exactly one blank metadata field: 任务分支",
+            ))
+        text = re.sub(pattern, f"- 任务分支: {branch}", text, count=1)
     return text
 
 
@@ -1413,14 +1685,36 @@ def command_start(args: argparse.Namespace, root: Path) -> None:
         ))
 
     original = read_document(entry)
-    updated = start_metadata(original, agent_name)
-    prompt = start_agent_prompt(
-        entry.task_id,
-        current_install_paths(),
-        task_size(entry, original),
+    size = task_size(entry, original)
+    plan = resolve_worktree_plan(
+        root,
+        entry,
+        size,
+        getattr(args, "worktree", "auto"),
         lite,
     )
-    moved = move_entry(entry, root, "working")
+    try:
+        updated = start_metadata(original, agent_name, plan.branch)
+        prompt = start_agent_prompt(
+            entry.task_id,
+            current_install_paths(),
+            size,
+            lite,
+            plan.cwd,
+            plan.branch,
+        )
+        moved = move_entry(entry, root, "working")
+    except (KanbanError, OSError, UnicodeError) as error:
+        cleanup_errors = cleanup_worktree_plan(plan)
+        if cleanup_errors:
+            raise KanbanError(
+                t(
+                    f"启动准备失败且 worktree 清理失败: {error}; ",
+                    f"Start preparation failed and worktree cleanup failed: {error}; ",
+                )
+                + "; ".join(cleanup_errors)
+            ) from error
+        raise
     name = window_name(entry, original)
     model_entry = config["models"]["kanban"][agent_name]
     agent_argv = [*agent_command(agent_name, agent, model_entry, entry.kind), prompt]
@@ -1428,14 +1722,14 @@ def command_start(args: argparse.Namespace, root: Path) -> None:
         write_text_atomic(moved.document, updated, entry=moved)
         if launcher == "foreground":
             try:
-                process = subprocess.Popen(agent_argv, cwd=root.parent)
+                process = subprocess.Popen(agent_argv, cwd=plan.cwd)
             except OSError as error:
                 raise KanbanError(t(f"启动 Agent 失败: {error}", f"Failed to start Agent: {error}")) from error
         elif launcher == "console":
             try:
                 process = subprocess.Popen(
                     agent_argv,
-                    cwd=root.parent,
+                    cwd=plan.cwd,
                     creationflags=(
                         subprocess.CREATE_NEW_CONSOLE
                         | subprocess.CREATE_NEW_PROCESS_GROUP
@@ -1447,11 +1741,11 @@ def command_start(args: argparse.Namespace, root: Path) -> None:
         else:
             command = shlex.join(agent_argv)
             create = launcher == "tmux-session" and not session_exists
-            result = tmux_launch(tmux, session, create, str(root.parent), name, command)
+            result = tmux_launch(tmux, session, create, str(plan.cwd), name, command)
             if create and result.returncode != 0 and session_owner(tmux, session) in ("", str(project)):
                 # 与另一次 start 抢建同一个 session 时改为在已建好的 session 里开 window.
                 create = False
-                result = tmux_launch(tmux, session, create, str(root.parent), name, command)
+                result = tmux_launch(tmux, session, create, str(plan.cwd), name, command)
             if result.returncode != 0:
                 subcommand = "new-session" if create else "new-window"
                 detail = result.stderr.strip() or f"exit {result.returncode}"
@@ -1461,22 +1755,31 @@ def command_start(args: argparse.Namespace, root: Path) -> None:
                 # 标记项目归属供后续复用校验; 写失败不影响本次启动, 未标记的 session 仍会被复用.
                 tmux_capture(tmux, "set-option", "-t", session, PROJECT_SESSION_OPTION, str(project))
     except (KanbanError, OSError, UnicodeError) as error:
-        rollback_errors: list[str] = []
+        card_rollback_errors: list[str] = []
         try:
             write_text_atomic(moved.document, original, entry=moved)
         except (OSError, UnicodeError, KanbanError) as content_error:
-            rollback_errors.append(t(f"恢复文档失败: {content_error}", f"failed to restore document: {content_error}"))
+            card_rollback_errors.append(t(f"恢复文档失败: {content_error}", f"failed to restore document: {content_error}"))
         try:
             rename_entry_nofollow(root, moved, entry.state)
         except (OSError, UnicodeError, KanbanError) as move_error:
-            rollback_errors.append(t(f"迁回 todo 失败: {move_error}", f"failed to move back to todo: {move_error}"))
-        if rollback_errors:
+            card_rollback_errors.append(t(f"迁回 todo 失败: {move_error}", f"failed to move back to todo: {move_error}"))
+        if card_rollback_errors:
             raise KanbanError(
                 t(
                     f"启动失败且回滚失败; 卡片保留在 working: {error}; ",
                     f"Start and rollback both failed; task remains in working: {error}; ",
                 )
-                + "; ".join(rollback_errors)
+                + "; ".join(card_rollback_errors)
+            ) from error
+        cleanup_errors = cleanup_worktree_plan(plan)
+        if cleanup_errors:
+            raise KanbanError(
+                t(
+                    f"启动失败; 卡片已迁回 todo, 但 worktree 清理失败: {error}; ",
+                    f"Start failed; the task returned to todo, but worktree cleanup failed: {error}; ",
+                )
+                + "; ".join(cleanup_errors)
             ) from error
         raise
     if launcher == "foreground":
@@ -1567,30 +1870,39 @@ def web_task_summary(entry: Entry, text: Optional[str] = None) -> dict:
     }
 
 
-def web_board_payload(root: Path) -> dict:
+def web_board_payload(root: Path, lite: bool = False) -> dict:
+    states = tuple(LITE_STATE_LABELS) if lite else STATES
     board = load_board(root)
     tasks = []
     for entry in board.entries.values():
+        if entry.state not in states:
+            continue
         tasks.append(web_task_summary(entry))
     tasks.sort(key=lambda row: (row["time"], row["task_id"]), reverse=True)
-    tasks.sort(key=lambda row: STATES.index(row["state"]) if row["state"] in STATES else len(STATES))
+    tasks.sort(key=lambda row: states.index(row["state"]) if row["state"] in states else len(states))
     return {
         "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "root": str(root),
+        "states": list(states),
         "tasks": tasks,
     }
 
 
-def web_task_payload(root: Path, task_id: str) -> dict:
+def web_task_payload(root: Path, task_id: str, lite: bool = False) -> dict:
     entry = locate(load_board(root), task_id)
+    if lite and entry.state not in LITE_STATE_LABELS:
+        raise FileNotFoundError(task_id)
     text = read_document(entry)
     payload = web_task_summary(entry, text)
     payload["document"] = text
     return payload
 
 
-def web_page_context() -> dict:
+def web_page_context(lite: bool = False) -> dict:
     lang = "cn" if t("任务看板", "Task Board") == "任务看板" else "en"
+    active_states = tuple(LITE_STATE_LABELS) if lite else STATES[:4]
+    archived_states = () if lite else STATES[4:]
+    state_labels = LITE_STATE_LABELS if lite else WEB_STATUS_LABELS[lang]
     return {
         "lang": lang,
         "title": t("任务看板", "Task Board"),
@@ -1613,7 +1925,9 @@ def web_page_context() -> dict:
         "empty_json": json.dumps(t("暂无任务", "No tasks"), ensure_ascii=False),
         "card_count_json": json.dumps(t("{count} 个任务", "{count} tasks"), ensure_ascii=False),
         "unassigned_json": json.dumps(t("未指派", "Unassigned"), ensure_ascii=False),
-        "status_labels_json": json.dumps(WEB_STATUS_LABELS[lang], ensure_ascii=False),
+        "status_labels_json": json.dumps(state_labels, ensure_ascii=False),
+        "active_states_json": json.dumps(active_states),
+        "archived_states_json": json.dumps(archived_states),
         "size_labels_json": json.dumps(WEB_SIZE_LABELS[lang], ensure_ascii=False),
         "updated_json": json.dumps(t("更新于", "Updated"), ensure_ascii=False),
         "error_json": json.dumps(t("加载失败", "Load failed"), ensure_ascii=False),
@@ -1622,6 +1936,7 @@ def web_page_context() -> dict:
 
 
 def command_web(args: argparse.Namespace, root: Path) -> None:
+    lite = getattr(args, "lite", False) or effective_config(load_config())["workflow_mode"] == "lite"
     scan_interval = args.refresh
     if scan_interval < 1:
         raise KanbanError(t("扫描间隔必须 >= 1 秒", "scan interval must be >= 1 second"))
@@ -1633,13 +1948,15 @@ def command_web(args: argparse.Namespace, root: Path) -> None:
 
     def get_board() -> dict:
         try:
-            return web_board_payload(root)
+            return web_board_payload(root, lite)
         except (KanbanError, OSError, UnicodeError) as error:
             raise kanban_web.KanbanWebError(str(error)) from error
 
     def get_task(task_id: str) -> dict:
         try:
-            return web_task_payload(root, task_id)
+            return web_task_payload(root, task_id, lite)
+        except FileNotFoundError:
+            raise
         except (KanbanError, OSError, UnicodeError) as error:
             raise kanban_web.KanbanWebError(str(error)) from error
 
@@ -1655,7 +1972,7 @@ def command_web(args: argparse.Namespace, root: Path) -> None:
             host=args.host,
             port=args.port,
             share_dir=share_dir,
-            page_context=web_page_context(),
+            page_context=web_page_context(lite),
             get_board=get_board,
             get_task=get_task,
             scan_interval=scan_interval,
@@ -1665,8 +1982,20 @@ def command_web(args: argparse.Namespace, root: Path) -> None:
         raise KanbanError(str(error)) from error
 
 
-def tui_page_context() -> dict:
+def tui_page_context(lite: bool = False) -> dict:
     lang = "cn" if t("任务看板", "Task Board") == "任务看板" else "en"
+    state_labels = LITE_STATE_LABELS if lite else WEB_STATUS_LABELS[lang]
+    board_help = (
+        t(
+            "方向键/hjkl/鼠标 移动 | 双击详情 | 拖选复制 | y 复制 ID | 滚轮翻卡 | -/= 栏宽 | PgUp/PgDn 翻页 | / 搜索 | Enter 详情 | t 主题 | r 刷新 | q 退出",
+            "arrows/hjkl/mouse move | double-click detail | drag to copy | y copy id | wheel cards | -/= width | PgUp/PgDn page | / search | Enter detail | t theme | r refresh | q quit",
+        )
+        if lite
+        else t(
+            "方向键/hjkl/鼠标 移动 | 双击详情 | 拖选复制 | y 复制 ID | 滚轮翻卡 | -/= 栏宽 | PgUp/PgDn 翻页 | / 搜索 | Enter 详情 | a 存档栏目 | t 主题 | r 刷新 | q 退出",
+            "arrows/hjkl/mouse move | double-click detail | drag to copy | y copy id | wheel cards | -/= width | PgUp/PgDn page | / search | Enter detail | a archives | t theme | r refresh | q quit",
+        )
+    )
     return {
         "title": t("任务看板", "Task Board"),
         "search": t("搜索", "Search"),
@@ -1686,10 +2015,7 @@ def tui_page_context() -> dict:
             "light": t("浅色", "light"),
             "dark": t("深色", "dark"),
         },
-        "help": t(
-            "方向键/hjkl/鼠标 移动 | 双击详情 | 拖选复制 | y 复制 ID | 滚轮翻卡 | -/= 栏宽 | PgUp/PgDn 翻页 | / 搜索 | Enter 详情 | a 存档栏目 | t 主题 | r 刷新 | q 退出",
-            "arrows/hjkl/mouse move | double-click detail | drag to copy | y copy id | wheel cards | -/= width | PgUp/PgDn page | / search | Enter detail | a archives | t theme | r refresh | q quit",
-        ),
+        "help": board_help,
         "detail_help": t(
             "hjkl/方向键 移动光标 | 滚轮滚动 | Ctrl-d/u 半页 | Ctrl-f/b 整页 | gg/G | v/V 选择 y 复制 | 拖选复制 | / 搜索 n/N | q/Esc 返回",
             "hjkl/arrows move cursor | wheel scroll | Ctrl-d/u half | Ctrl-f/b page | gg/G | v/V select y copy | drag to copy | / search n/N | q/Esc back",
@@ -1700,12 +2026,13 @@ def tui_page_context() -> dict:
         "no_match": t("无匹配", "no match"),
         "terminal_init_failed": t("终端初始化失败", "failed to initialize terminal"),
         "unknown_theme": t("未知主题", "unknown theme"),
-        "state_labels": WEB_STATUS_LABELS[lang],
+        "state_labels": state_labels,
         "size_labels": WEB_SIZE_LABELS[lang],
     }
 
 
 def command_tui(args: argparse.Namespace, root: Path) -> None:
+    lite = getattr(args, "lite", False) or effective_config(load_config())["workflow_mode"] == "lite"
     if args.refresh < 1:
         raise KanbanError(t("刷新间隔必须 >= 1 秒", "refresh interval must be >= 1 second"))
     if not (sys.stdin.isatty() and sys.stdout.isatty()):
@@ -1725,12 +2052,14 @@ def command_tui(args: argparse.Namespace, root: Path) -> None:
         kanban_tui.run(
             single=args.single,
             refresh_interval=args.refresh,
-            context=tui_page_context(),
-            get_board=lambda: web_board_payload(root),
-            get_task=lambda task_id: web_task_payload(root, task_id),
+            context=tui_page_context(lite),
+            get_board=lambda: web_board_payload(root, lite),
+            get_task=lambda task_id: web_task_payload(root, task_id, lite),
             theme=args.theme,
             column_width=kanban_tui.load_column_width(),
             persist_column_width=kanban_tui.save_column_width,
+            active_states=tuple(LITE_STATE_LABELS) if lite else STATES[:4],
+            all_states=tuple(LITE_STATE_LABELS) if lite else STATES,
         )
     except kanban_tui.KanbanTuiError as error:
         raise KanbanError(str(error)) from error
@@ -1806,6 +2135,15 @@ def parser() -> argparse.ArgumentParser:
     start_parser.add_argument(
         "--launcher", choices=LAUNCHERS, help=t("覆盖配置中的启动方式", "override the configured launcher")
     )
+    start_parser.add_argument(
+        "--worktree",
+        choices=WORKTREE_MODES,
+        default="auto",
+        help=t(
+            "Lite 工作树策略: auto/current/required, 默认 auto",
+            "Lite worktree policy: auto/current/required; default auto",
+        ),
+    )
 
     do_parser = commands.add_parser("do", help=t("添加或领取任务并立即启动", "add or claim a task and start it"))
     do_parser.add_argument("--size", type=str.upper, choices=TASK_SIZES, default="S", help=t("新任务规模, 默认 S", "new-task size; default S"))
@@ -1813,6 +2151,15 @@ def parser() -> argparse.ArgumentParser:
     do_parser.add_argument("--slug", help=t("新任务 slug", "new-task slug"))
     do_parser.add_argument("--agent", choices=AGENT_NAMES, help=t("覆盖配置中的默认 Agent", "override the configured default Agent"))
     do_parser.add_argument("--launcher", choices=LAUNCHERS, help=t("覆盖配置中的启动方式", "override the configured launcher"))
+    do_parser.add_argument(
+        "--worktree",
+        choices=WORKTREE_MODES,
+        default="auto",
+        help=t(
+            "Lite 工作树策略: auto/current/required, 默认 auto",
+            "Lite worktree policy: auto/current/required; default auto",
+        ),
+    )
     do_parser.add_argument("item", nargs="+", metavar=t("task-id 或标题", "task-id or title"))
 
     commands.add_parser("check", help=t("检查看板不变量", "check board invariants"))

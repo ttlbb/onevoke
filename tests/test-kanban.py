@@ -183,6 +183,45 @@ printf '%s\\n' '@9'
         self.env["KANBAN_TMUX_LOG"] = str(self.root / "tmux.log")
         return fake_bin
 
+    def make_git_project_board(self, branch: str = "develop") -> tuple[Path, Path]:
+        project = self.root / "project"
+        project.mkdir()
+        subprocess.run(
+            ["git", "init", "-b", branch, str(project)],
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        (project / "README.md").write_text("# project\n", encoding="utf-8")
+        subprocess.run(
+            ["git", "-C", str(project), "add", "README.md"],
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(project),
+                "-c",
+                "user.name=Onevoke Test",
+                "-c",
+                "user.email=onevoke@example.invalid",
+                "commit",
+                "-m",
+                "init",
+            ],
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        self.env.pop("KANBAN_DIR", None)
+        self.run_command("init", str(project))
+        board = project / "kanban"
+        self.env["KANBAN_DIR"] = str(board)
+        return project, board
+
     def test_locale_selects_chinese_or_english(self) -> None:
         chinese = self.run_command("--help")
         self.assertIn("本地文件看板", chinese.stdout)
@@ -657,6 +696,117 @@ printf '%s\\n' '@9'
         self.assertIn("Lite 模式只支持 Codex 或 Claude Executor", result.stderr)
         self.assertTrue(task.exists())
 
+    def test_lite_large_start_creates_task_worktree_and_records_branch(self) -> None:
+        project, board = self.make_git_project_board()
+        self.install_fake_launchers()
+        task_id = f"{datetime.now().strftime('%Y%m%d')}-large-worktree-task"
+        self.run_kb("add", "--size", "L", "--slug", "large-worktree", "大型隔离任务")
+        self.run_command("pick", task_id)
+
+        result = self.run_kb("start", task_id)
+
+        target = project / "worktrees" / task_id
+        self.assertIn(f"已启动: {task_id}", result.stdout)
+        self.assertTrue(target.is_dir())
+        branch = subprocess.run(
+            ["git", "-C", str(target), "branch", "--show-current"],
+            text=True,
+            capture_output=True,
+            check=True,
+        ).stdout.strip()
+        self.assertEqual(task_id, branch)
+        spec = board / "working" / task_id / "spec.md"
+        self.assertIn(f"- 任务分支: {task_id}\n", spec.read_text(encoding="utf-8"))
+        tmux_args = (self.root / "tmux.log").read_text(encoding="utf-8").splitlines()
+        self.assertEqual(str(target), tmux_args[tmux_args.index("-c") + 1])
+        self.assertEqual(
+            "",
+            subprocess.run(
+                ["git", "-C", str(project), "status", "--porcelain"],
+                text=True,
+                capture_output=True,
+                check=True,
+            ).stdout,
+        )
+
+    def test_lite_small_uses_clean_develop_and_required_upgrades_medium(self) -> None:
+        project, board = self.make_git_project_board()
+        self.install_fake_launchers()
+        date = datetime.now().strftime("%Y%m%d")
+
+        small_id = f"{date}-small-current-task"
+        self.run_kb("add", "--slug", "small-current", "小任务")
+        self.run_command("pick", small_id)
+        self.run_kb("start", small_id)
+        small = board / "working" / f"{small_id}.md"
+        self.assertIn("- 任务分支: develop\n", small.read_text(encoding="utf-8"))
+        tmux_args = (self.root / "tmux.log").read_text(encoding="utf-8").splitlines()
+        self.assertEqual(str(project), tmux_args[tmux_args.index("-c") + 1])
+
+        medium_id = f"{date}-medium-required-task"
+        self.run_kb("add", "--size", "M", "--slug", "medium-required", "中任务")
+        self.run_command("pick", medium_id)
+        self.run_kb("start", "--worktree", "required", medium_id)
+        target = project / "worktrees" / medium_id
+        self.assertTrue(target.is_dir())
+        medium = board / "working" / f"{medium_id}.md"
+        self.assertIn(f"- 任务分支: {medium_id}\n", medium.read_text(encoding="utf-8"))
+
+    def test_lite_auto_isolates_a_dirty_current_worktree(self) -> None:
+        project, board = self.make_git_project_board()
+        self.install_fake_launchers()
+        task_id = f"{datetime.now().strftime('%Y%m%d')}-dirty-current-task"
+        self.run_kb("add", "--slug", "dirty-current", "脏工作树隔离")
+        self.run_command("pick", task_id)
+        (project / "local-change.txt").write_text("user change\n", encoding="utf-8")
+
+        rejected = self.run_kb(
+            "start", "--worktree", "current", task_id, succeeds=False
+        )
+
+        self.assertIn("当前工作树不干净", rejected.stderr)
+        self.assertTrue((board / "todo" / f"{task_id}.md").is_file())
+
+        self.run_kb("start", task_id)
+
+        target = project / "worktrees" / task_id
+        self.assertTrue(target.is_dir())
+        started = board / "working" / f"{task_id}.md"
+        self.assertIn(f"- 任务分支: {task_id}\n", started.read_text(encoding="utf-8"))
+        self.assertEqual("user change\n", (project / "local-change.txt").read_text())
+
+    def test_lite_large_rejects_current_and_failed_launch_cleans_new_worktree(self) -> None:
+        project, board = self.make_git_project_board()
+        self.install_fake_launchers()
+        date = datetime.now().strftime("%Y%m%d")
+        current_id = f"{date}-large-current-task"
+        self.run_kb("add", "--size", "L", "--slug", "large-current", "大型当前任务")
+        self.run_command("pick", current_id)
+
+        rejected = self.run_kb(
+            "start", "--worktree", "current", current_id, succeeds=False
+        )
+
+        self.assertIn("Lite L 任务强制使用独立 worktree", rejected.stderr)
+        self.assertTrue((board / "todo" / current_id).is_dir())
+
+        failed_id = f"{date}-large-cleanup-task"
+        self.run_kb("add", "--size", "L", "--slug", "large-cleanup", "大型失败任务")
+        self.run_command("pick", failed_id)
+        self.env["KANBAN_TMUX_FAIL"] = "1"
+        failed = self.run_kb("start", failed_id, succeeds=False)
+
+        self.assertIn("tmux new-window 失败", failed.stderr)
+        self.assertTrue((board / "todo" / failed_id).is_dir())
+        self.assertFalse((project / "worktrees" / failed_id).exists())
+        branch = subprocess.run(
+            ["git", "-C", str(project), "show-ref", "--verify", f"refs/heads/{failed_id}"],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertNotEqual(0, branch.returncode)
+
     def test_start_uses_configured_models_and_efforts(self) -> None:
         task_id, _ = self.make_todo("custom-model")
         self.install_fake_launchers()
@@ -820,6 +970,8 @@ printf '%s\\n' '@9'
 
     def test_start_uses_high_effort_for_large_tasks(self) -> None:
         self.install_fake_launchers()
+        # 该用例覆盖三种旧 Agent 的模型参数, 使用 Classic 保留 Grok 行为.
+        self.write_onevoke_config("codex", "tmux")
         for agent, expected in (
             ("codex", '--model gpt-5.6-sol --config \'model_reasoning_effort="high"\''),
             ("claude", "--model opus --effort high"),
@@ -3670,6 +3822,58 @@ N/A
         payload = kanban["web_task_payload"](self.root, task_id)
         self.assertEqual(current_group, payload["task_group"])
 
+    def test_lite_web_and_tui_use_only_four_mapped_states(self) -> None:
+        task_id, _task = self.make_todo("lite-view")
+        archived_id = f"{datetime.now().strftime('%Y%m%d')}-lite-archived-task"
+        (self.root / "archived" / f"{archived_id}.md").write_text(
+            "# archived\n", encoding="utf-8"
+        )
+        sys.path.insert(0, str(COMMAND.parent))
+        try:
+            kanban = runpy.run_path(str(COMMAND), run_name="kanban_lite_view_test")
+            import kanban_tui
+            import kanban_web
+        finally:
+            sys.path.pop(0)
+
+        payload = kanban["web_board_payload"](self.root, True)
+        self.assertEqual(["backlog", "todo", "working", "done"], payload["states"])
+        self.assertEqual([task_id], [task["task_id"] for task in payload["tasks"]])
+        context = kanban["web_page_context"](True)
+        self.assertEqual(
+            {"backlog": "Inbox", "todo": "Todo", "working": "Doing", "done": "Done"},
+            json.loads(context["status_labels_json"]),
+        )
+        self.assertEqual([], json.loads(context["archived_states_json"]))
+        page = kanban_web.render_board_page(
+            PROJECT_ROOT / "share" / "kanban-web", context
+        ).decode("utf-8")
+        self.assertIn('activeStates: ["backlog", "todo", "working", "done"]', page)
+        self.assertIn("archivedStates: []", page)
+        with self.assertRaises(FileNotFoundError):
+            kanban["web_task_payload"](self.root, archived_id, True)
+        classic = kanban["web_board_payload"](self.root)
+        self.assertEqual(
+            ["backlog", "todo", "working", "done", "archived", "trash"],
+            classic["states"],
+        )
+        self.assertIn(archived_id, [task["task_id"] for task in classic["tasks"]])
+
+        model = kanban_tui.BoardModel(
+            active_states=("backlog", "todo", "working", "done"),
+            all_states=("backlog", "todo", "working", "done"),
+        )
+        model.set_board({
+            "tasks": [
+                {"task_id": task_id, "state": "todo"},
+                {"task_id": archived_id, "state": "archived"},
+            ]
+        })
+        self.assertEqual(("backlog", "todo", "working", "done"), model.states)
+        self.assertEqual([task_id], [task["task_id"] for task in model.tasks])
+        model.toggle_archived()
+        self.assertFalse(model.show_archived)
+
     def test_web_task_group_card_renders_as_badge_after_task_id(self) -> None:
         script = (PROJECT_ROOT / "share" / "kanban-web" / "board.js").read_text(
             encoding="utf-8"
@@ -3824,6 +4028,8 @@ N/A
                 html = response.read().decode("utf-8")
             self.assertIn("任务看板", html)
             self.assertIn("SSE", html)
+            self.assertIn('activeStates: ["backlog", "todo", "working", "done"]', html)
+            self.assertIn("archivedStates: []", html)
 
             with urllib.request.urlopen(
                 f"http://127.0.0.1:{port}/static/board.js", timeout=2
@@ -3851,6 +4057,7 @@ N/A
             with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/board", timeout=2) as response:
                 payload = json.loads(response.read().decode("utf-8"))
             self.assertEqual(1, len(payload["tasks"]))
+            self.assertEqual(["backlog", "todo", "working", "done"], payload["states"])
             self.assertEqual(task_id, payload["tasks"][0]["task_id"])
             self.assertEqual("todo", payload["tasks"][0]["state"])
 

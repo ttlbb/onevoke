@@ -682,6 +682,8 @@ class BoardModel:
     show_archived: bool = False
     column_index: int = 0
     column_offset: int = 0
+    active_states: tuple[str, ...] = ACTIVE_STATES
+    all_states: tuple[str, ...] = ALL_STATES
     selected_ids: dict[str, Optional[str]] = field(
         default_factory=lambda: {state: None for state in ALL_STATES}
     )
@@ -696,13 +698,23 @@ class BoardModel:
     refresh_error: str = ""
     detail_error: str = ""
 
+    def __post_init__(self) -> None:
+        if not self.active_states or any(
+            state not in self.all_states for state in self.active_states
+        ):
+            raise KanbanTuiError("active states must be a non-empty subset of all states")
+        for state in self.all_states:
+            self.selected_ids.setdefault(state, None)
+            self.selected_indexes.setdefault(state, 0)
+            self.scrolls.setdefault(state, 0)
+
     @property
     def error(self) -> str:
         return self.refresh_error or self.detail_error
 
     @property
     def states(self) -> tuple[str, ...]:
-        return ALL_STATES if self.show_archived else ACTIVE_STATES
+        return self.all_states if self.show_archived else self.active_states
 
     @property
     def current_state(self) -> str:
@@ -715,7 +727,7 @@ class BoardModel:
         parsed = [
             task
             for task in tasks
-            if isinstance(task, dict) and task.get("state") in ALL_STATES
+            if isinstance(task, dict) and task.get("state") in self.all_states
         ]
         generated_at = str(payload.get("generated_at") or "")
         next_key = board_content_key(parsed)
@@ -739,7 +751,7 @@ class BoardModel:
     def normalize(self) -> None:
         self.column_index = min(self.column_index, len(self.states) - 1)
         self.column_offset = max(0, min(self.column_offset, self.column_index))
-        for state in ALL_STATES:
+        for state in self.all_states:
             tasks = self.tasks_for(state)
             task_ids = [str(task.get("task_id") or "") for task in tasks]
             selected = self.selected_ids[state]
@@ -817,6 +829,8 @@ class BoardModel:
         )
 
     def toggle_archived(self) -> None:
+        if self.all_states == self.active_states:
+            return
         current = self.current_state
         self.show_archived = not self.show_archived
         if current in self.states:
@@ -840,9 +854,15 @@ class KanbanTui:
         column_width: int = DEFAULT_COLUMN_WIDTH,
         persist_column_width: Optional[Callable[[int], None]] = None,
         copy_to_clipboard_fn: Optional[Callable[[str], tuple[bool, str]]] = None,
+        active_states: tuple[str, ...] = ACTIVE_STATES,
+        all_states: tuple[str, ...] = ALL_STATES,
     ) -> None:
         self.screen = screen
-        self.model = BoardModel(single=single)
+        self.model = BoardModel(
+            single=single,
+            active_states=active_states,
+            all_states=all_states,
+        )
         self.refresh_interval = refresh_interval
         self.theme = theme
         self.column_width = clamp_column_width(column_width)
@@ -2355,6 +2375,8 @@ def run(
     theme: str = "auto",
     column_width: Optional[int] = None,
     persist_column_width: Optional[Callable[[int], None]] = None,
+    active_states: tuple[str, ...] = ACTIVE_STATES,
+    all_states: tuple[str, ...] = ALL_STATES,
 ) -> None:
     if theme not in THEMES:
         raise KanbanTuiError(f"{context.get('unknown_theme', '未知主题')}: {theme}")
@@ -2383,6 +2405,8 @@ def run(
             theme=theme,
             column_width=preferred_width,
             persist_column_width=persist_column_width,
+            active_states=active_states,
+            all_states=all_states,
         ).run(initial_board)
 
     try:
